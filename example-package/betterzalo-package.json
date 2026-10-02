@@ -1,0 +1,10 @@
+{
+  "name": "betterzalo",
+  "version": "0.1.0",
+  "minZaloVersion": "26.0.0",
+  "maxZaloVersion": "26.99.99",
+  "files": [
+    { "src": "payload/betterzalo-core.js", "dest": "betterzalo/betterzalo-core.js" },
+    { "src": "payload/README.txt", "dest": "betterzalo/README.txt" }
+  ]
+}

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+
+# Patcher runtime state (local dev only; real installs use %APPDATA%\BetterZaloPatcher)
+.betterzalo/
+config.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+
+# Build outputs (future single-exe bundles)
+dist/
+out/
+*.exe
+!example-package/**
