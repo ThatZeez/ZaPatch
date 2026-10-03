@@ -63,6 +63,15 @@ export function unsupportedVersion(zaloVersion, min, max) {
   );
 }
 
+export function unsupportedVersionList(zaloVersion, supported) {
+  return new PatcherError(
+    Codes.UNSUPPORTED_VERSION,
+    `Unsupported Zalo version: ${zaloVersion} (supported: ${supported.join(', ')}). Refusing to patch.`,
+    'Wait for a compatible BetterZalo package, or restore and stay on a supported Zalo version.',
+    EXIT.UNSUPPORTED_VERSION,
+  );
+}
+
 export function permissionDenied(target, hint = '') {
   return new PatcherError(
     Codes.PERMISSION_DENIED,
@@ -112,7 +121,7 @@ export function packageInvalid(reason) {
   return new PatcherError(
     Codes.PACKAGE_INVALID,
     `Missing or invalid BetterZalo package: ${reason}`,
-    'Pass a package directory containing a valid betterzalo-package.json manifest.',
+    'Pass a package directory containing a valid manifest.json (or legacy betterzalo-package.json).',
     EXIT.PACKAGE_INVALID,
   );
 }

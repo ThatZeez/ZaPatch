@@ -24,4 +24,3 @@ desktop.ini
 dist/
 out/
 *.exe
-!example-package/**

@@ -6,7 +6,7 @@ Windows-only CLI to install, update, verify, and restore BetterZalo on Zalo PC.
 
 - This repo is the **patcher only**: detection, version checks, backup, patch, verification, restore, status.
 - The modding framework, plugins, themes, and Settings UI live in the separate **BetterZalo** repo.
-- The patcher consumes a BetterZalo **package directory** (`betterzalo-package.json` manifest + payload files). It never embeds the framework.
+- The patcher consumes a BetterZalo **package directory** (`manifest.json` + `checksums.txt` + payload files). It never embeds the framework.
 
 ## Requirements
 
@@ -17,8 +17,8 @@ Windows-only CLI to install, update, verify, and restore BetterZalo on Zalo PC.
 ```powershell
 node src/main.js --help
 node src/main.js status
-node src/main.js install --package ./example-package
-node src/main.js update --package ./example-package
+node src/main.js install --package ./BetterZalo-v0.1.0
+node src/main.js update --package ./BetterZalo-v0.1.0
 node src/main.js restore
 node src/main.js version
 ```
@@ -74,7 +74,7 @@ src/
     config.js        persisted install path
     logger.js        file logging (no sensitive data)
     constants.js     versions, paths, exit codes
-example-package/     minimal valid package (placeholder payload, not the framework)
+BetterZalo-v0.1.0/   shipped BetterZalo build (manifest.json + checksums.txt + files/)
 test/                node:test suites (stdlib only)
 ```
 

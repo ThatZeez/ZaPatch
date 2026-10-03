@@ -6,7 +6,7 @@ Windows-only CLI patcher for BetterZalo. Zero dependencies (Node stdlib only).
 
 - This repo: install/update/restore/status, detection, backup, verification, logging.
 - BetterZalo repo: framework, plugins, themes, Settings UI. Never reimplement those here.
-- Consume BetterZalo via `betterzalo-package.json` manifest; never embed the framework.
+- Consume BetterZalo via its `manifest.json` package (legacy `betterzalo-package.json` still loads); never embed the framework.
 
 ## Rules
 

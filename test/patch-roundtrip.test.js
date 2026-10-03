@@ -3,9 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { createBackup, listBackups } from '../src/patcher/backup.js';
-import { loadPackage } from '../src/patcher/package.js';
+import { loadPackage, sha256File } from '../src/patcher/package.js';
 import { applyPatch } from '../src/patcher/patch.js';
 import { restoreFromBackup } from '../src/patcher/restore.js';
 import { getStatus } from '../src/patcher/status.js';
@@ -20,8 +19,25 @@ async function makeFakeInstall() {
   return { installDir, versionDir };
 }
 
-function examplePackageDir() {
-  return fileURLToPath(new URL('../example-package', import.meta.url));
+// Builds a manifest.json-format package in a temp dir (hermetic fixture).
+async function makeFixturePackage() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'bzpkg-'));
+  const core = path.join(dir, 'files', 'betterzalo-core.js');
+  await fs.mkdir(path.dirname(core), { recursive: true });
+  await fs.writeFile(core, 'fixture-core');
+  const hash = await sha256File(core);
+  const st = await fs.stat(core);
+  await fs.writeFile(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      manifestVersion: 1,
+      name: 'BetterZalo',
+      version: '9.9.9',
+      supportedZaloVersions: ['26.9.10'],
+      files: [{ path: 'files/betterzalo-core.js', size: st.size, sha256: hash }],
+    }),
+  );
+  return loadPackage(dir).then((pkg) => ({ pkg, dir }));
 }
 
 test('patch -> verify -> status -> restore roundtrip', async () => {
@@ -30,10 +46,11 @@ test('patch -> verify -> status -> restore roundtrip', async () => {
   await fs.mkdir(path.join(versionDir, 'betterzalo'), { recursive: true });
   await fs.writeFile(path.join(versionDir, 'betterzalo', 'betterzalo-core.js'), 'original');
 
-  const pkg = await loadPackage(examplePackageDir());
+  const { pkg, dir: pkgDir } = await makeFixturePackage();
   const { receipt, backup } = await applyPatch({ versionDir, zaloVersion: '26.9.10', pkg, onStep: () => {} });
 
-  assert.ok(receipt.files.length === 2);
+  assert.equal(receipt.files.length, 1);
+  assert.equal(receipt.files[0].dest, 'betterzalo/betterzalo-core.js');
   assert.ok((await listBackups(installDir)).length === 1);
   assert.equal(backup.manifest.zaloVersion, '26.9.10');
 
@@ -49,6 +66,7 @@ test('patch -> verify -> status -> restore roundtrip', async () => {
   assert.equal(await fs.readFile(path.join(versionDir, 'betterzalo', 'betterzalo-core.js'), 'utf8'), 'original');
 
   await fs.rm(installDir, { recursive: true, force: true });
+  await fs.rm(pkgDir, { recursive: true, force: true });
 });
 
 test('createBackup records added files without content', async () => {

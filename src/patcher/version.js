@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { unsupportedVersion } from './errors.js';
+import { unsupportedVersion, unsupportedVersionList } from './errors.js';
 
 export function parseVersion(str) {
   if (typeof str !== 'string') return null;
@@ -81,13 +81,33 @@ export async function detectZaloVersion(resolved) {
 }
 
 export function checkCompatibility(zaloVersion, pkg) {
+  if (!zaloVersion) {
+    throw unsupportedVersion('unknown', pkg.minZaloVersion || null, pkg.maxZaloVersion || null);
+  }
+  // Explicit per-version list wins over the min/max range when present.
+  if (Array.isArray(pkg.supportedZaloVersions) && pkg.supportedZaloVersions.length > 0) {
+    const ok = pkg.supportedZaloVersions.some((entry) => versionMatchesEntry(zaloVersion, entry));
+    if (!ok) {
+      throw unsupportedVersionList(zaloVersion, pkg.supportedZaloVersions);
+    }
+    return true;
+  }
   const min = pkg.minZaloVersion || null;
   const max = pkg.maxZaloVersion || null;
-  if (!zaloVersion) {
-    throw unsupportedVersion('unknown', min, max);
-  }
   if (!satisfiesRange(zaloVersion, min, max)) {
     throw unsupportedVersion(zaloVersion, min, max);
   }
   return true;
+}
+
+// Matches a live Zalo version against one supported-versions entry.
+// Tolerates 4-part Windows FileVersions ("26.9.10.2959") against 3-part
+// entries ("26.9.10") by comparing the leading parts.
+export function versionMatchesEntry(live, entry) {
+  if (live === entry) return true;
+  if (typeof live === 'string' && typeof entry === 'string' && live.startsWith(entry + '.')) return true;
+  const pl = parseVersion(live);
+  const pe = parseVersion(entry);
+  if (!pl || !pe) return false;
+  return pl.major === pe.major && pl.minor === pe.minor && pl.patch === pe.patch;
 }

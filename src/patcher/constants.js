@@ -37,6 +37,8 @@ export function backupsRootFor(installDir) {
 }
 
 export const PACKAGE_MANIFEST_NAME = 'betterzalo-package.json';
+export const NEW_MANIFEST_NAME = 'manifest.json';
+export const CHECKSUMS_NAME = 'checksums.txt';
 
 // Candidate default Zalo locations, checked in order. Never assume one
 // hardcoded path: users install via different packages/scopes.
