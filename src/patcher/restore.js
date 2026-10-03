@@ -35,6 +35,10 @@ export async function restoreFromBackup({ versionDir, backup }) {
     await fs.rm(receiptPathFor(versionDir), { force: true });
     // Remove the state dir if it is now empty (best effort).
     await fs.rmdir(stateDirFor(versionDir)).catch(() => {});
+    // Prune empty BetterZalo-owned dirs left behind after removing
+    // added files (e.g. betterzalo/plugins/). Only touches our own
+    // namespace; rmdir fails harmlessly on non-empty dirs.
+    await pruneEmptyDirs(path.join(versionDir, 'betterzalo'));
     return { restored, removed };
   } catch (e) {
     throw restoreFailed(e.message);
@@ -51,4 +55,13 @@ export async function resolveBackup({ installDir, backupId = null, zaloVersion =
   const latest = await findLatestBackup(installDir, zaloVersion);
   if (!latest) throw restoreFailed('no backup available for this installation');
   return latest;
+}
+
+async function pruneEmptyDirs(root) {
+  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null);
+  if (!entries) return;
+  for (const e of entries) {
+    if (e.isDirectory()) await pruneEmptyDirs(path.join(root, e.name));
+  }
+  await fs.rmdir(root).catch(() => {});
 }

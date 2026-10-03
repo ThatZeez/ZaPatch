@@ -64,7 +64,17 @@ test('patch -> verify -> status -> restore roundtrip', async () => {
   const result = await restoreFromBackup({ versionDir, backup });
   assert.ok(result.restored.includes('betterzalo/betterzalo-core.js'));
   assert.equal(await fs.readFile(path.join(versionDir, 'betterzalo', 'betterzalo-core.js'), 'utf8'), 'original');
+  await fs.rm(installDir, { recursive: true, force: true });
+  await fs.rm(pkgDir, { recursive: true, force: true });
+});
 
+test('restore prunes empty BetterZalo dirs left by added files', async () => {
+  const { installDir, versionDir } = await makeFakeInstall();
+  const { pkg, dir: pkgDir } = await makeFixturePackage();
+  const { backup } = await applyPatch({ versionDir, zaloVersion: '26.9.10', pkg, onStep: () => {} });
+  // Added-only files vanish on restore, so the now-empty dir goes too.
+  await restoreFromBackup({ versionDir, backup });
+  assert.equal(await fs.stat(path.join(versionDir, 'betterzalo')).then(() => true).catch(() => false), false);
   await fs.rm(installDir, { recursive: true, force: true });
   await fs.rm(pkgDir, { recursive: true, force: true });
 });
