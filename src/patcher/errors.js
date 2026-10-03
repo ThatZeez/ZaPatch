@@ -22,6 +22,11 @@ export const Codes = {
   VERIFY_FAILED: 'VERIFY_FAILED',
   RESTORE_FAILED: 'RESTORE_FAILED',
   PACKAGE_INVALID: 'PACKAGE_INVALID',
+  DOWNLOAD_FAILED: 'DOWNLOAD_FAILED',
+  RELEASE_FAILED: 'RELEASE_FAILED',
+  SELF_UPDATE_FAILED: 'SELF_UPDATE_FAILED',
+  INTERRUPTED: 'INTERRUPTED',
+  NOT_FOUND: 'NOT_FOUND',
   NO_BACKUP: 'NO_BACKUP',
   ABORTED: 'ABORTED',
 };
@@ -123,5 +128,41 @@ export function packageInvalid(reason) {
     `Missing or invalid BetterZalo package: ${reason}`,
     'Pass a package directory containing a valid manifest.json (or legacy betterzalo-package.json).',
     EXIT.PACKAGE_INVALID,
+  );
+}
+
+export function downloadFailed(target, reason) {
+  return new PatcherError(
+    Codes.DOWNLOAD_FAILED,
+    `Download failed (${target}): ${reason}`,
+    'Check your network connection and retry. A local package can be used offline with --package <dir>.',
+    EXIT.DOWNLOAD_FAILED,
+  );
+}
+
+export function releaseFailed(source, reason, hint = '') {
+  return new PatcherError(
+    Codes.RELEASE_FAILED,
+    `Release lookup failed (${source}): ${reason}`,
+    hint || 'The official release may not exist yet. A local package can be used offline with --package <dir>.',
+    EXIT.DOWNLOAD_FAILED,
+  );
+}
+
+export function selfUpdateFailed(reason) {
+  return new PatcherError(
+    Codes.SELF_UPDATE_FAILED,
+    `ZaPatch self-update failed: ${reason}`,
+    'The current executable was left untouched. Retry later or download the new ZaPatch.exe manually.',
+    EXIT.SELF_UPDATE_FAILED,
+  );
+}
+
+export function interrupted(op = 'operation') {
+  return new PatcherError(
+    Codes.INTERRUPTED,
+    `Interrupted by user during ${op}.`,
+    'Partial changes were rolled back where possible. Run Repair to reconcile.',
+    EXIT.INTERRUPTED,
   );
 }

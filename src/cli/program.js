@@ -1,44 +1,56 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { cleanupWorkDir, packageFromArchive } from '../patcher/artifact.js';
 import { saveConfig } from '../patcher/config.js';
-import { EXIT, PATCHER_NAME, PATCHER_VERSION } from '../patcher/constants.js';
+import { downloadCacheDir, EXIT, PATCHER_NAME, PATCHER_VERSION } from '../patcher/constants.js';
 import { findDefaultInstall, validateAndResolve } from '../patcher/detection.js';
-import { Codes, PatcherError } from '../patcher/errors.js';
+import { Codes, PatcherError, unsupportedVersion } from '../patcher/errors.js';
 import { createLogger } from '../patcher/logger.js';
 import { checkWritable, isElevated } from '../patcher/permissions.js';
 import { loadPackage } from '../patcher/package.js';
 import { applyPatch } from '../patcher/patch.js';
+import { downloadFile } from '../patcher/download.js';
+import { betterZaloRelease, resolveAssetSha256 } from '../patcher/release.js';
+import { repairInstallation } from '../patcher/repair.js';
 import { resolveBackup, restoreFromBackup } from '../patcher/restore.js';
 import { getStatus } from '../patcher/status.js';
-import { checkUpdateState } from '../patcher/update.js';
-import { readReceipt } from '../patcher/verification.js';
+import { applySelfUpdate, checkSelfUpdate, isNewer, normalizeTag } from '../patcher/updater.js';
+import { readReceipt, verifyAgainstReceipt } from '../patcher/verification.js';
 import { checkCompatibility, detectZaloVersion } from '../patcher/version.js';
+import { confirm } from './menu.js';
 import * as out from './output.js';
 import { selectInstallation } from './selection.js';
 
-const COMMANDS = ['install', 'update', 'restore', 'status', 'version'];
+const COMMANDS = ['install', 'repair', 'uninstall', 'restore', 'update', 'status', 'version', 'menu'];
 
 export function printHelp() {
   out.info(`${PATCHER_NAME} v${PATCHER_VERSION} — Windows-only CLI for BetterZalo
 `);
   out.info('Usage:');
-  out.info('  betterzalo-patcher <command> [options]\n');
+  out.info('  ZaPatch                        Open the interactive main menu');
+  out.info('  ZaPatch <command> [options]\n');
   out.info('Commands:');
-  out.info('  install   Install BetterZalo into the selected Zalo installation');
-  out.info('  update    Check for Zalo updates and repatch when compatible');
-  out.info('  restore   Restore original Zalo files from a verified backup');
-  out.info('  status    Report installation, version, patch and backup state');
-  out.info('  version   Print the patcher version\n');
+  out.info('  install    Install BetterZalo (downloads the official release unless --package is given)');
+  out.info('  repair     Repair a damaged BetterZalo installation (targeted, keeps backups)');
+  out.info('  uninstall  Remove BetterZalo and restore original Zalo files (alias: restore)');
+  out.info('  update     Update ZaPatch itself (never updates BetterZalo)');
+  out.info('  status     Report installation, version, patch and backup state');
+  out.info('  version    Print the ZaPatch version');
+  out.info('  menu       Open the interactive main menu\n');
   out.info('Options:');
   out.info('  --zalo-path <dir>   Use this Zalo installation directory (skip prompts)');
-  out.info('  --package <dir>     BetterZalo package directory (install/update)');
-  out.info('  --backup <id>       Backup id to restore (restore)');
+  out.info('  --package <dir>     Local BetterZalo package directory (offline install/repair)');
+  out.info('  --backup <id>       Backup id to restore (uninstall)');
   out.info('  --json              Machine-readable status output (status)');
+  out.info('  --yes               Confirm without prompting (scripts)');
+  out.info('  --no-pause          Do not wait for Enter before exiting');
   out.info('  --help, -h          Show this help');
-  out.info('  --version, -V       Print the patcher version');
+  out.info('  --version, -V       Print the ZaPatch version');
 }
 
 export function parseArgs(argv) {
   const args = argv.slice(2);
-  const opts = { command: null, zaloPath: null, pkg: null, backup: null, json: false };
+  const opts = { command: null, zaloPath: null, pkg: null, backup: null, json: false, yes: false, noPause: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if ((a === '--help' || a === '-h') && !opts.command) {
@@ -59,6 +71,10 @@ export function parseArgs(argv) {
       opts.backup = a.slice('--backup='.length);
     } else if (a === '--json') {
       opts.json = true;
+    } else if (a === '--yes' || a === '-y') {
+      opts.yes = true;
+    } else if (a === '--no-pause') {
+      opts.noPause = true;
     } else if (!a.startsWith('-') && !opts.command) {
       opts.command = a;
     } else {
@@ -68,29 +84,269 @@ export function parseArgs(argv) {
   return opts;
 }
 
-// Shared prelude for commands that need a verified installation:
+// Shared prelude for flows that need a verified installation:
 // resolve path (flag/persisted/prompt) -> validate -> detect version.
-async function resolveVerifiedInstallation(opts, logger) {
-  const resolved = await selectInstallation({ zaloPathFlag: opts.zaloPath });
+async function resolveVerifiedInstallation(opts, logger, signal) {
+  signal?.throwIfInterrupted?.('setup');
+  const resolved = await selectInstallation({ zaloPathFlag: opts.zaloPath, signal });
   await logger.info('installation selected', { path: resolved.installDir });
   const full = await validateAndResolve(resolved.installDir);
   const live = await detectZaloVersion(full);
   if (!live.version) {
-    const { unsupportedVersion } = await import('../patcher/errors.js');
     throw unsupportedVersion('unknown', null, null);
   }
   return { ...full, zaloVersion: live.version, versionSource: live.source };
 }
 
-function onStepLogger(logger) {
+function steps() {
   return (name, status) => out.step(name, status);
 }
 
-export async function run(argv = process.argv) {
+function progressPrinter(label) {
+  let last = 0;
+  return ({ downloaded, total }) => {
+    const now = Date.now();
+    if (now - last < 250) return;
+    last = now;
+    const extra = total ? ` / ${(total / 1048576).toFixed(1)} MB` : '';
+    process.stdout.write(`\r${label} ${(downloaded / 1048576).toFixed(1)} MB${extra} ...`);
+  };
+}
+
+// Obtains a verified BetterZalo package: explicit --package dir wins
+// (offline); otherwise the official GitHub release is downloaded,
+// verified, and cached for reuse.
+export async function resolveBetterZaloPackage({ pkgDirFlag, zaloVersion, logger, signal }) {
+  if (pkgDirFlag) {
+    const pkg = await loadPackage(pkgDirFlag);
+    await logger.info('local package loaded', { name: pkg.name, version: pkg.version, dir: pkg.dir });
+    return { pkg, cleanup: async () => {} };
+  }
+
+  const { release, asset } = await betterZaloRelease();
+  await logger.info('release found', { tag: release.tag, asset: asset.name });
+  out.info(`BetterZalo release: ${release.tag} (${asset.name})`);
+
+  const tagSlug = normalizeTag(release.tag).replace(/[^0-9A-Za-z._-]+/g, '_') || 'latest';
+  const cacheTarget = path.join(downloadCacheDir(), `betterzalo-${tagSlug}`);
+  const cached = await loadPackage(cacheTarget).catch(() => null);
+  if (cached) {
+    try {
+      checkCompatibility(zaloVersion, cached);
+      out.info(`Using cached BetterZalo ${cached.version}.`);
+      await logger.info('cache hit', { dir: cacheTarget, version: cached.version });
+      return { pkg: cached, cleanup: async () => {} };
+    } catch {
+      await logger.info('cached package incompatible, re-downloading', { dir: cacheTarget });
+    }
+  }
+
+  signal?.throwIfInterrupted?.('download');
+  const { sha256, source } = await resolveAssetSha256(release, asset);
+  await logger.info('checksum source', { source });
+  out.info(`Verifying download via ${source}...`);
+  await fs.mkdir(downloadCacheDir(), { recursive: true });
+  const archivePath = path.join(downloadCacheDir(), `${tagSlug}-${asset.name}`);
+  const print = progressPrinter('Downloading BetterZalo');
+  await downloadFile(asset.url, archivePath, { expectedSha256: sha256, onProgress: print, signal });
+  process.stdout.write('\n');
+  await logger.info('download verified', { bytes: asset.size });
+
+  const { pkg, workDir } = await packageFromArchive(archivePath, { workParent: downloadCacheDir() });
+  await fs.rm(cacheTarget, { recursive: true, force: true }).catch(() => {});
+  await fs.rename(workDir, cacheTarget).catch(() => {});
+  const dir = await fs.stat(cacheTarget).then(() => cacheTarget).catch(() => workDir);
+  await logger.info('artifact ready', { dir, version: pkg.version });
+  return { pkg, cleanup: () => cleanupWorkDir(dir === cacheTarget ? null : workDir) };
+}
+
+async function ensureWritable(versionDir) {
+  try {
+    await fs.access(versionDir, fs.constants.W_OK);
+  } catch {
+    const elevated = await isElevated();
+    throw new PatcherError(
+      Codes.PERMISSION_DENIED,
+      `Permission denied: ${versionDir}`,
+      elevated === false
+        ? 'Close Zalo, re-run this terminal as Administrator, then retry.'
+        : 'Close Zalo (it may lock its files) and retry.',
+      EXIT.PERMISSION,
+    );
+  }
+  const probe = await checkWritable([versionDir]);
+  if (!probe.ok) {
+    throw new PatcherError(Codes.PERMISSION_DENIED, `Permission denied: ${probe.denied[0]}`, 'Close Zalo and retry.', EXIT.PERMISSION);
+  }
+}
+
+// --- Flows (shared by menu actions and subcommands) ---
+
+export async function flowInstall({ opts, logger, signal }) {
+  const inst = await resolveVerifiedInstallation(opts, logger, signal);
+  await saveConfig(inst.installDir).catch(() => {});
+  out.info(`\nDetecting Zalo...         ${out.c.green('OK')}`);
+  out.info(`Zalo version: ${inst.zaloVersion} (${inst.versionSource})`);
+
+  const { pkg, cleanup } = await resolveBetterZaloPackage({
+    pkgDirFlag: opts.pkg,
+    zaloVersion: inst.zaloVersion,
+    logger,
+    signal,
+  });
+  try {
+    out.info(`BetterZalo build: ${pkg.name} ${pkg.version}`);
+    checkCompatibility(inst.zaloVersion, pkg);
+    await logger.info('version check passed', { zalo: inst.zaloVersion, pkg: pkg.version });
+    await ensureWritable(inst.versionDir);
+
+    const { receipt, backup } = await applyPatch({
+      versionDir: inst.versionDir,
+      zaloVersion: inst.zaloVersion,
+      pkg,
+      onStep: steps(),
+      signal,
+    });
+    await logger.info('installed', {
+      zalo: inst.zaloVersion,
+      package: `${pkg.name}@${pkg.version}`,
+      backup: backup.id,
+      files: receipt.files.length,
+    });
+    console.log('\nBetterZalo installed successfully.');
+    return EXIT.OK;
+  } finally {
+    await cleanup().catch(() => {});
+  }
+}
+
+export async function flowRepair({ opts, logger, signal }) {
+  const inst = await resolveVerifiedInstallation(opts, logger, signal);
+  await saveConfig(inst.installDir).catch(() => {});
+  out.info(`\nZalo version: ${inst.zaloVersion} (${inst.versionSource})`);
+
+  const { pkg, cleanup } = await resolveBetterZaloPackage({
+    pkgDirFlag: opts.pkg,
+    zaloVersion: inst.zaloVersion,
+    logger,
+    signal,
+  });
+  try {
+    const result = await repairInstallation({
+      versionDir: inst.versionDir,
+      installDir: inst.installDir,
+      zaloVersion: inst.zaloVersion,
+      pkg,
+      onStep: steps(),
+      signal,
+    });
+    await logger.info('repair finished', { status: result.status, repaired: result.repaired });
+    if (result.status === 'healthy') {
+      console.log('\nBetterZalo is healthy. Nothing to repair.');
+    } else {
+      console.log(`\nRepaired ${result.repaired.length} file(s). Original backup preserved (${result.backupId}).`);
+    }
+    return EXIT.OK;
+  } finally {
+    await cleanup().catch(() => {});
+  }
+}
+
+export async function flowUninstall({ opts, logger, signal }) {
+  const inst = await resolveVerifiedInstallation(opts, logger, signal);
+  signal?.throwIfInterrupted?.('uninstall');
+
+  const receipt = await readReceipt(inst.versionDir);
+  const backup = await resolveBackup({
+    installDir: inst.installDir,
+    backupId: opts.backup,
+    zaloVersion: inst.zaloVersion,
+  }).catch(() => null);
+
+  if (!receipt && !backup) {
+    out.info('BetterZalo does not appear to be installed here, and no backup exists.');
+    out.info('Nothing to uninstall.');
+    return EXIT.OK;
+  }
+  if (!backup) {
+    throw new PatcherError(
+      Codes.RESTORE_FAILED,
+      'BetterZalo files are present but no verified backup exists. Refusing to delete files blindly.',
+      'Reinstall the same Zalo version, run Install to create a backup, then uninstall.',
+      EXIT.RESTORE_FAILED,
+    );
+  }
+
+  await logger.info('uninstall started', { backup: backup.id, zalo: inst.zaloVersion });
+  out.info(`Restoring original files from backup ${backup.id}...`);
+  const result = await restoreFromBackup({ versionDir: inst.versionDir, backup });
+  await logger.info('uninstalled', { restored: result.restored.length, removed: result.removed.length });
+
+  const leftover = await readReceipt(inst.versionDir);
+  if (leftover) {
+    throw new PatcherError(Codes.VERIFY_FAILED, 'Uninstall left a BetterZalo receipt behind.', 'Run Repair, then try again.', EXIT.VERIFY_FAILED);
+  }
+  console.log(`\nRestored ${result.restored.length} original file(s), removed ${result.removed.length} BetterZalo file(s).`);
+  console.log('Backup retained (backups are never auto-deleted).');
+  console.log('Zalo is back to its original state.');
+  return EXIT.OK;
+}
+
+export async function flowSelfUpdate({ opts, logger, signal }) {
+  signal?.throwIfInterrupted?.('self-update');
+  out.info(`ZaPatch version: ${PATCHER_VERSION}`);
+  const { release, asset, latest } = await checkSelfUpdate();
+  await logger.info('self-update check', { current: PATCHER_VERSION, latest });
+  if (!isNewer(latest, PATCHER_VERSION)) {
+    out.info(`Already up to date (${PATCHER_VERSION}).`);
+    return EXIT.OK;
+  }
+  out.info(`New version available: ${latest} (release: ${release.tag})`);
+  if (!opts.yes) {
+    if (!process.stdin.isTTY) {
+      throw new PatcherError(
+        Codes.ABORTED,
+        'Refusing to self-update without confirmation in non-interactive mode.',
+        'Re-run with --yes to confirm.',
+        EXIT.USAGE,
+      );
+    }
+    const ok = await confirm(`Download and install ZaPatch ${latest}?`, { signal });
+    if (!ok) {
+      out.info('Self-update cancelled.');
+      return EXIT.OK;
+    }
+  }
+  const print = progressPrinter('Downloading ZaPatch');
+  const result = await applySelfUpdate({ asset, release, onProgress: print, signal });
+  process.stdout.write('\n');
+  await logger.info('self-updated', { version: result.version });
+  console.log(`\nZaPatch updated to ${result.version}.`);
+  console.log('Restart ZaPatch to use the new version.');
+  console.log(`(Previous executable kept as ${result.backupExe}; it is removed on next start.)`);
+  return EXIT.OK;
+}
+
+// Menu action map for the interactive main menu.
+export function menuFlows(logger) {
+  const base = { logger };
+  return {
+    install: ({ signal }) => flowInstall({ opts: {}, logger: base.logger, signal }),
+    repair: ({ signal }) => flowRepair({ opts: {}, logger: base.logger, signal }),
+    uninstall: ({ signal }) => flowUninstall({ opts: {}, logger: base.logger, signal }),
+    'self-update': ({ signal }) => flowSelfUpdate({ opts: { yes: false }, logger: base.logger, signal }),
+  };
+}
+
+// --- Subcommand entry ---
+
+export async function run(argv = process.argv, { signal = null } = {}) {
   const logger = createLogger();
   const opts = parseArgs(argv);
 
-  if (!opts.command || opts.command === 'help') {
+  if (!opts.command || opts.command === 'help' || opts.command === 'menu') {
+    if (!opts.command) return { menu: true, logger, signal, opts };
+    if (opts.command === 'menu') return { menu: true, logger, signal, opts };
     printHelp();
     return EXIT.OK;
   }
@@ -104,24 +360,26 @@ export async function run(argv = process.argv) {
 
   switch (opts.command) {
     case 'status':
-      return cmdStatus(opts, logger);
+      return cmdStatus(opts, logger, signal);
     case 'install':
-      return cmdInstall(opts, logger);
+      return flowInstall({ opts, logger, signal });
+    case 'repair':
+      return flowRepair({ opts, logger, signal });
+    case 'uninstall':
     case 'restore':
-      return cmdRestore(opts, logger);
+      return flowUninstall({ opts, logger, signal });
     case 'update':
-      return cmdUpdate(opts, logger);
+      return flowSelfUpdate({ opts, logger, signal });
     default:
       throw new PatcherError(Codes.ABORTED, `Unknown command: ${opts.command}`, '', EXIT.USAGE);
   }
 }
 
-async function cmdStatus(opts, logger) {
+async function cmdStatus(opts, logger, _signal) {
   let resolved;
   if (opts.zaloPath) {
     resolved = await validateAndResolve(opts.zaloPath);
   } else {
-    // Status never prompts on first launch without TTY; report not-found instead.
     const { loadConfig } = await import('../patcher/config.js');
     const saved = await loadConfig();
     if (saved) {
@@ -137,7 +395,7 @@ async function cmdStatus(opts, logger) {
         return EXIT.NOT_FOUND;
       }
       out.info('Zalo installation: NotFound');
-      out.info('Run `install` and select your Zalo directory to get started.');
+      out.info('Run ZaPatch and select Install to get started.');
       return EXIT.NOT_FOUND;
     }
   }
@@ -154,106 +412,8 @@ async function cmdStatus(opts, logger) {
   out.info(`Patch status:     ${status.patchStatus}`);
   out.info(`Backup:           ${status.backup}`);
   if (status.receiptZaloVersion && status.zaloVersion && status.receiptZaloVersion !== status.zaloVersion) {
-    out.warn(`\nZalo was updated (${status.receiptZaloVersion} -> ${status.zaloVersion}). Run \`update\` with a compatible package.`);
+    out.warn(`\nZalo was updated (${status.receiptZaloVersion} -> ${status.zaloVersion}). Run Repair or Install with a compatible release.`);
     return EXIT.UNSUPPORTED_VERSION;
   }
   return status.patchStatus === 'Invalid' ? EXIT.VERIFY_FAILED : EXIT.OK;
-}
-
-async function cmdInstall(opts, logger) {
-  if (!opts.pkg) {
-    throw new PatcherError(Codes.PACKAGE_INVALID, 'No BetterZalo package given.', 'Re-run with --package <dir>.', EXIT.PACKAGE_INVALID);
-  }
-  const pkg = await loadPackage(opts.pkg);
-  await logger.info('package loaded', { name: pkg.name, version: pkg.version });
-
-  const inst = await resolveVerifiedInstallation(opts, logger);
-  await saveConfig(inst.installDir).catch(() => {});
-  out.info(`\nDetecting Zalo...         ${out.c.green('OK')}`);
-  out.info(`Zalo version: ${inst.zaloVersion} (${inst.versionSource})`);
-
-  checkCompatibility(inst.zaloVersion, pkg);
-  await logger.info('version check passed', { zalo: inst.zaloVersion, pkg: pkg.version });
-
-  const writable = await checkWritable([inst.versionDir]);
-  if (!writable.ok) {
-    const elevated = await isElevated();
-    throw new PatcherError(
-      Codes.PERMISSION_DENIED,
-      `Permission denied: ${writable.denied[0]}`,
-      elevated === false
-        ? 'Close Zalo, re-run this terminal as Administrator, then retry.'
-        : 'Close Zalo (it may lock its files) and retry.',
-      EXIT.PERMISSION,
-    );
-  }
-
-  const { receipt, backup } = await applyPatch({
-    versionDir: inst.versionDir,
-    zaloVersion: inst.zaloVersion,
-    pkg,
-    onStep: onStepLogger(logger),
-  });
-  await logger.info('installed', {
-    zalo: inst.zaloVersion,
-    package: `${pkg.name}@${pkg.version}`,
-    backup: backup.id,
-    files: receipt.files.length,
-  });
-  console.log('\nBetterZalo installed successfully.');
-  return EXIT.OK;
-}
-
-async function cmdRestore(opts, logger) {
-  const inst = await resolveVerifiedInstallation(opts, logger);
-  const backup = await resolveBackup({
-    installDir: inst.installDir,
-    backupId: opts.backup,
-    zaloVersion: inst.zaloVersion,
-  });
-  await logger.info('restore started', { backup: backup.id, zalo: inst.zaloVersion });
-  out.info(`Restoring backup ${backup.id}...`);
-  const result = await restoreFromBackup({ versionDir: inst.versionDir, backup });
-  await logger.info('restored', { restored: result.restored.length, removed: result.removed.length });
-  console.log(`\nRestored ${result.restored.length} file(s), removed ${result.removed.length} added file(s).`);
-  console.log('Backup retained (backups are never auto-deleted).');
-  return EXIT.OK;
-}
-
-async function cmdUpdate(opts, logger) {
-  const inst = await resolveVerifiedInstallation(opts, logger);
-  const receipt = await readReceipt(inst.versionDir);
-  const state = await checkUpdateState({ resolved: inst, receipt });
-
-  if (!receipt) {
-    out.info('BetterZalo is not installed in this Zalo version directory.');
-    out.info('Run `install` with --package <dir> to install it.');
-    return EXIT.NOT_FOUND;
-  }
-  if (!state.needsAttention) {
-    out.info(`Zalo version: ${state.live.version} — matches patched version. Nothing to do.`);
-    const { verifyAgainstReceipt } = await import('../patcher/verification.js');
-    const v = await verifyAgainstReceipt({ versionDir: inst.versionDir, receipt });
-    out.info(`Patch status: ${v.ok ? 'Valid' : 'Invalid'}`);
-    return v.ok ? EXIT.OK : EXIT.VERIFY_FAILED;
-  }
-
-  out.warn(`Zalo was updated (${state.previous} -> ${state.live.version}).`);
-  out.warn('The current BetterZalo patch may no longer be compatible.');
-  await logger.warn('zalo updated since patch', { previous: state.previous, current: state.live.version });
-  if (!opts.pkg) {
-    out.info('Re-run with --package <dir> containing a compatible build to repatch.');
-    return EXIT.UNSUPPORTED_VERSION;
-  }
-  const pkg = await loadPackage(opts.pkg);
-  checkCompatibility(state.live.version, pkg);
-  out.info(`Compatible package found: ${pkg.name} ${pkg.version}. Repatching...`);
-  await applyPatch({
-    versionDir: inst.versionDir,
-    zaloVersion: state.live.version,
-    pkg,
-    onStep: onStepLogger(logger),
-  });
-  console.log('\nBetterZalo updated successfully.');
-  return EXIT.OK;
 }

@@ -12,7 +12,7 @@ function toDestRel(dest) {
 // Full patch pipeline from the spec:
 // verify files -> backup -> apply -> verify -> report.
 // Rolls back from the verified backup when the apply step fails.
-export async function applyPatch({ versionDir, zaloVersion, pkg, onStep = () => {} }) {
+export async function applyPatch({ versionDir, zaloVersion, pkg, onStep = () => {}, signal = null }) {
   const plan = pkg.files.map((f) => ({
     ...f,
     destRel: toDestRel(f.dest),
@@ -47,6 +47,7 @@ export async function applyPatch({ versionDir, zaloVersion, pkg, onStep = () => 
   const applied = [];
   try {
     for (const item of plan) {
+      signal?.throwIfInterrupted?.('install');
       await fs.mkdir(path.dirname(item.destAbs), { recursive: true });
       await fs.copyFile(item.srcAbs, item.destAbs);
       applied.push(item);
@@ -54,6 +55,7 @@ export async function applyPatch({ versionDir, zaloVersion, pkg, onStep = () => 
   } catch (e) {
     onStep('Applying BetterZalo', 'fail');
     await rollbackPartial({ versionDir, backup, applied }).catch(() => {});
+    if (e.code === 'INTERRUPTED') throw e;
     throw patchFailed(e.message);
   }
   onStep('Applying BetterZalo', 'ok');
@@ -71,13 +73,18 @@ export async function applyPatch({ versionDir, zaloVersion, pkg, onStep = () => 
   await fs.mkdir(stateDirFor(versionDir), { recursive: true });
   await fs.writeFile(receiptPathFor(versionDir), JSON.stringify(receipt, null, 2), 'utf8');
 
-  for (const item of plan) {
-    const actual = await hashFile(item.destAbs).catch(() => null);
-    if (actual !== item.sha256) {
-      onStep('Verifying installation', 'fail');
-      await rollbackPartial({ versionDir, backup, applied }).catch(() => {});
-      throw patchFailed(`post-copy hash mismatch: ${item.destRel}`);
+  try {
+    for (const item of plan) {
+      signal?.throwIfInterrupted?.('install');
+      const actual = await hashFile(item.destAbs).catch(() => null);
+      if (actual !== item.sha256) {
+        throw patchFailed(`post-copy hash mismatch: ${item.destRel}`);
+      }
     }
+  } catch (e) {
+    onStep('Verifying installation', 'fail');
+    await rollbackPartial({ versionDir, backup, applied }).catch(() => {});
+    throw e;
   }
   onStep('Verifying installation', 'ok');
   return { receipt, backup };

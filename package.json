@@ -1,15 +1,17 @@
 {
   "name": "betterzalo-patcher",
   "version": "0.1.0",
-  "description": "Windows-only CLI patcher for BetterZalo (Zalo PC modding framework)",
+  "description": "ZaPatch — Windows-only standalone CLI patcher for BetterZalo (ships as ZaPatch.exe)",
   "type": "module",
   "main": "src/main.js",
   "bin": {
-    "betterzalo-patcher": "src/main.js"
+    "zapatch": "src/main.js"
   },
   "scripts": {
     "start": "node src/main.js",
-    "test": "node --test test/*.test.js"
+    "menu": "node src/main.js menu",
+    "test": "node --test test/*.test.js",
+    "build:exe": "bun build --compile src/main.js --outfile dist/ZaPatch.exe"
   },
   "engines": {
     "node": ">=18"
