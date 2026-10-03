@@ -17,13 +17,15 @@ ZaPatch
 
 What would you like to do?
 
-[1] Install BetterZalo
-[2] Repair BetterZalo
-[3] Uninstall BetterZalo
-[4] Update ZaPatch
-
-Select an option:
+> Install BetterZalo
+  ------------------
+  Repair BetterZalo
+  Uninstall BetterZalo
+  Update ZaPatch
 ```
+
+Navigate with `↑`/`↓`, confirm with `Enter` (`Esc` cancels). Piped/non-TTY
+input falls back to a numbered prompt automatically.
 
 - `Install` picks the Zalo install (default detection or custom dir), downloads the
   official BetterZalo release, verifies SHA-256, checks Zalo compatibility, backs up,
