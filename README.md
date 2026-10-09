@@ -13,12 +13,12 @@ Ships as a standalone **`ZaPatch.exe`** (no Node.js required for end users).
 ## For users (ZaPatch.exe)
 
 ```text
-ZaPatch
+ZaPatch v0.1.0 — Windows CLI
 
 What would you like to do?
+Use the arrow keys to navigate. Press Enter to confirm.
 
-> Install BetterZalo
-  ------------------
+> Install BetterZalo   <- underlined
   Repair BetterZalo
   Uninstall BetterZalo
   Update ZaPatch

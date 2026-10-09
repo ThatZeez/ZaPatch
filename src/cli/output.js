@@ -1,12 +1,17 @@
 // Tiny terminal helpers. No dependencies; honors NO_COLOR and non-TTY.
-const enabled = process.stdout.isTTY && !process.env.NO_COLOR;
+// FORCE_COLOR=1 forces ANSI styling (used by tests and piped output).
+function colorEnabled() {
+  if (process.env.NO_COLOR) return false;
+  return !!process.stdout.isTTY || !!process.env.FORCE_COLOR;
+}
 
 function paint(code, s) {
-  return enabled ? `\x1b[${code}m${s}\x1b[0m` : s;
+  return colorEnabled() ? `\x1b[${code}m${s}\x1b[0m` : s;
 }
 
 export const c = {
   bold: (s) => paint('1', s),
+  underline: (s) => paint('4', s),
   green: (s) => paint('32', s),
   red: (s) => paint('31', s),
   yellow: (s) => paint('33', s),

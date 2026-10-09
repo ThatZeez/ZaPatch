@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { MENU_ITEMS, moveIndex, renderMenuBlock, selectOption } from '../src/cli/menu.js';
+import { MENU_ITEMS, initialWindow, menuHeader, moveIndex, renderMenuBlock, resolveViewportHeight, selectOption, shiftWindow } from '../src/cli/menu.js';
 import { createInterrupt } from '../src/patcher/interrupt.js';
+
+// Force ANSI styling so underline codes are visible outside a TTY.
+process.env.FORCE_COLOR = '1';
+
+const UL = '\x1b[4m';
+const RESET = '\x1b[0m';
 
 function fakeStdin() {
   const s = new EventEmitter();
@@ -34,9 +40,9 @@ const key = (name, extra = {}) => ({ name, ...extra });
 
 test('menu opens with the first option selected', () => {
   const lines = renderMenuBlock(MENU_ITEMS, 0);
-  assert.equal(lines[0], '> Install BetterZalo');
-  assert.equal(lines[1], `  ${'-'.repeat('Install BetterZalo'.length)}`);
-  assert.equal(lines[2], '  Repair BetterZalo');
+  assert.equal(lines.length, MENU_ITEMS.length);
+  assert.equal(lines[0], `> ${UL}Install BetterZalo${RESET}`);
+  assert.equal(lines[1], '  Repair BetterZalo');
 });
 
 test('down moves the selection and arrow+underline follow it', () => {
@@ -45,9 +51,8 @@ test('down moves the selection and arrow+underline follow it', () => {
   assert.equal(selected, 1);
   const lines = renderMenuBlock(MENU_ITEMS, selected);
   assert.equal(lines[0], '  Install BetterZalo');
-  assert.equal(lines[1], '> Repair BetterZalo');
-  assert.equal(lines[2], `  ${'-'.repeat('Repair BetterZalo'.length)}`);
-  assert.equal(lines[3], '  Uninstall BetterZalo');
+  assert.equal(lines[1], `> ${UL}Repair BetterZalo${RESET}`);
+  assert.equal(lines[2], '  Uninstall BetterZalo');
 });
 
 test('up moves the selection back', () => {
@@ -75,7 +80,7 @@ test('options map to the existing actions in order', () => {
 test('interactive rendering requires no numeric input', () => {
   for (let i = 0; i < MENU_ITEMS.length; i++) {
     for (const line of renderMenuBlock(MENU_ITEMS, i)) {
-      assert.match(line, /^(>|  |  -+)/);
+      assert.match(line, /^(>|  )/);
       assert.doesNotMatch(line, /\[\d\]/);
     }
   }
@@ -91,8 +96,7 @@ test('keypress down/down/up/enter selects the second option', async () => {
   stdin.emit('keypress', null, key('return'));
   assert.equal(await pending, 1);
   const screen = stdout.text();
-  assert.ok(screen.includes('> Repair BetterZalo'));
-  assert.ok(screen.includes(`  ${'-'.repeat('Repair BetterZalo'.length)}`));
+  assert.ok(screen.includes(`> ${UL}Repair BetterZalo${RESET}`));
 });
 
 test('selection clamps at the last option', async () => {
@@ -121,4 +125,147 @@ test('ctrl+c interrupts and flags the signal', async () => {
   stdin.emit('keypress', null, { name: 'c', ctrl: true });
   assert.equal(await pending, null);
   assert.equal(signal.interrupted, true);
+});
+
+// Minimal terminal emulator: \r \n SGR \x1b[nA \x1b[0K \x1b[J, wrap at width.
+function emulateScreen(writes, width) {
+  const rows = [''];
+  let r = 0;
+  let c = 0;
+  const put = (ch) => {
+    if (c >= width) {
+      r++;
+      c = 0;
+    }
+    while (rows.length <= r) rows.push('');
+    rows[r] = rows[r].slice(0, c) + ch + rows[r].slice(c + 1);
+    c++;
+  };
+  const s = writes.join('');
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '\r') {
+      c = 0;
+      i++;
+    } else if (s[i] === '\n') {
+      r++;
+      c = 0;
+      i++;
+    } else if (s[i] === '\x1b' && s[i + 1] === '[') {
+      const m = /^\x1b\[([?0-9;]*)([A-Za-z])/.exec(s.slice(i));
+      if (!m) {
+        i += 2;
+        continue;
+      }
+      i += m[0].length;
+      if (m[2] === 'A') r = Math.max(0, r - (parseInt(m[1]) || 1));
+      else if (m[2] === 'K') {
+        while (rows.length <= r) rows.push('');
+        rows[r] = rows[r].slice(0, c);
+      } else if (m[2] === 'J') {
+        while (rows.length <= r) rows.push('');
+        rows.length = r + 1;
+        rows[r] = rows[r].slice(0, c);
+      }
+      // SGR (m) and cursor visibility are zero-width.
+    } else {
+      put(s[i]);
+      i++;
+    }
+  }
+  return rows.map((x) => x.replace(/\s+$/, '')).filter((x, idx, arr) => !(x === '' && idx === arr.length - 1));
+}
+
+test('long navigation leaves no stale option copies on screen', async () => {
+  for (const width of [80, 40]) {
+    const stdin = fakeStdin();
+    const stdout = fakeStdout();
+    const pending = selectOption({ items: MENU_ITEMS, input: stdin, output: stdout });
+    const seq = ['down', 'down', 'down', 'down', 'down', 'down', 'up', 'up', 'down', 'up', 'down', 'down'];
+    for (const name of seq) stdin.emit('keypress', null, key(name));
+    stdin.emit('keypress', null, key('return'));
+    assert.equal(await pending, 4);
+    const screen = emulateScreen(stdout.chunks, width);
+    assert.deepEqual(screen, [
+      '  Install BetterZalo',
+      '  Repair BetterZalo',
+      '  Uninstall BetterZalo',
+      '  Update ZaPatch',
+      '> Exit',
+    ]);
+  }
+});
+
+const MANY = Array.from({ length: 8 }, (_, i) => ({ label: `Option ${i + 1}` }));
+
+test('viewport follows the selection down and back up symmetrically', () => {
+  const size = 4;
+  let start = initialWindow(0, MANY.length, size);
+  assert.equal(start, 0);
+  // ↓↓↓↓ : selection 4, window slides to [1..4].
+  for (const sel of [1, 2, 3, 4]) start = shiftWindow(start, sel, MANY.length, size);
+  assert.equal(start, 1);
+  // ↑↑↑↑ : selection 0, window returns to [0..3].
+  for (const sel of [3, 2, 1, 0]) start = shiftWindow(start, sel, MANY.length, size);
+  assert.equal(start, 0);
+});
+
+test('window never exceeds the list and short lists show fully', () => {
+  assert.equal(shiftWindow(0, 7, 8, 4), 4);
+  assert.equal(shiftWindow(4, 7, 8, 4), 4);
+  assert.equal(initialWindow(0, 3, 10), 0);
+  assert.deepEqual(
+    renderMenuBlock(MANY.slice(0, 3), 0, 0, 3),
+    [`> ${UL}Option 1${RESET}`, '  Option 2', '  Option 3'],
+  );
+});
+
+test('viewport height adapts to terminal rows', () => {
+  assert.equal(resolveViewportHeight({ rows: 30 }), 20);
+  assert.equal(resolveViewportHeight({}), 14);
+  assert.equal(resolveViewportHeight({ rows: 5 }), 3);
+});
+
+test('header pins title and instructions', () => {
+  const header = menuHeader();
+  assert.ok(header[0].includes('ZaPatch v'));
+  assert.ok(header.some((l) => l.includes('What would you like to do?')));
+  assert.ok(header.some((l) => l.includes('arrow keys')));
+});
+
+test('down-down-down-down-up-up-up-up round trip restores the viewport', async () => {
+  const stdin = fakeStdin();
+  const stdout = fakeStdout();
+  const pending = selectOption({ items: MANY, input: stdin, output: stdout, maxVisible: 4 });
+  for (const name of ['down', 'down', 'down', 'down', 'up', 'up', 'up', 'up']) {
+    stdin.emit('keypress', null, key(name));
+  }
+  stdin.emit('keypress', null, key('return'));
+  assert.equal(await pending, 0);
+  for (const width of [80, 40]) {
+    // Emulator strips styling; underline verified on raw bytes below.
+    assert.deepEqual(emulateScreen(stdout.chunks, width), [
+      '> Option 1',
+      '  Option 2',
+      '  Option 3',
+      '  Option 4',
+    ]);
+  }
+  assert.ok(stdout.text().includes(`> ${UL}Option 1${RESET}`));
+});
+
+test('scrolled viewport shows the underline on the visible selection', async () => {
+  const stdin = fakeStdin();
+  const stdout = fakeStdout();
+  const pending = selectOption({ items: MANY, input: stdin, output: stdout, maxVisible: 4 });
+  for (let i = 0; i < 5; i++) stdin.emit('keypress', null, key('down'));
+  stdin.emit('keypress', null, key('return'));
+  assert.equal(await pending, 5);
+  assert.deepEqual(emulateScreen(stdout.chunks, 80), [
+    '  Option 3',
+    '  Option 4',
+    '  Option 5',
+    '> Option 6',
+  ]);
+  assert.ok(stdout.text().includes(`> ${UL}Option 6${RESET}`));
 });
