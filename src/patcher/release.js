@@ -12,23 +12,10 @@ import { fetchText, firstHexToken } from './download.js';
 // A "<asset>.sha256" sidecar is preferred for verification; the API
 // `digest` field is the fallback. Either way a SHA-256 is required.
 
-export async function fetchLatestRelease(apiUrl) {
-  let body;
-  try {
-    body = await fetchText(apiUrl, { headers: { Accept: 'application/vnd.github+json' } });
-  } catch (e) {
-    throw releaseFailed(apiUrl, e.message);
-  }
-  let data;
-  try {
-    data = JSON.parse(body);
-  } catch {
-    throw releaseFailed(apiUrl, 'release API did not return JSON');
-  }
+function normalizeRelease(data, apiUrl) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.assets)) {
     throw releaseFailed(apiUrl, 'unexpected release payload (no assets array)');
   }
-  if (data.draft) throw releaseFailed(apiUrl, 'latest release is a draft');
   return {
     tag: data.tag_name || data.name || 'unknown',
     name: data.name || data.tag_name || 'unknown',
@@ -43,6 +30,45 @@ export async function fetchLatestRelease(apiUrl) {
         digest: digestOf(a.digest),
       })),
   };
+}
+
+export async function fetchLatestRelease(apiUrl) {
+  let body;
+  try {
+    body = await fetchText(apiUrl, { headers: { Accept: 'application/vnd.github+json' } });
+  } catch (e) {
+    throw releaseFailed(apiUrl, e.message);
+  }
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw releaseFailed(apiUrl, 'release API did not return JSON');
+  }
+  const release = normalizeRelease(data, apiUrl);
+  if (data.draft) throw releaseFailed(apiUrl, 'latest release is a draft');
+  return release;
+}
+
+// Lists recent releases (newest first) for channel selection.
+export async function listReleases(apiUrl, { limit = 10 } = {}) {
+  const listUrl = `${apiUrl.replace(/\/latest\/?$/, '')}?per_page=${Math.max(1, Math.min(limit, 30))}`;
+  let body;
+  try {
+    body = await fetchText(listUrl, { headers: { Accept: 'application/vnd.github+json' } });
+  } catch (e) {
+    throw releaseFailed(listUrl, e.message);
+  }
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw releaseFailed(listUrl, 'release API did not return JSON');
+  }
+  if (!Array.isArray(data)) throw releaseFailed(listUrl, 'unexpected release list payload');
+  return data
+    .filter((d) => d && typeof d === 'object' && !d.draft)
+    .map((d) => normalizeRelease(d, listUrl));
 }
 
 function digestOf(field) {
@@ -82,14 +108,38 @@ export async function resolveAssetSha256(release, asset) {
   throw releaseFailed(release.tag, `no SHA-256 available for ${asset.name} (no sidecar, no API digest)`);
 }
 
-export async function betterZaloRelease() {
+export const BUILD_CHANNELS = ['stable', 'alpha'];
+
+export function normalizeChannel(value) {
+  const c = String(value || 'stable').trim().toLowerCase();
+  if (!BUILD_CHANNELS.includes(c)) {
+    throw releaseFailed('channel', `unknown build channel: ${value} (expected stable or alpha)`);
+  }
+  return c;
+}
+
+export async function betterZaloRelease(channel = 'stable') {
   const api = betterZaloReleaseApi();
-  const release = await fetchLatestRelease(api);
+  const want = normalizeChannel(channel);
+  let release;
+  if (want === 'alpha') {
+    const all = await listReleases(api);
+    release = all.find((r) => r.prerelease) || null;
+    if (!release) {
+      throw releaseFailed(api, 'no alpha/pre-release build published yet');
+    }
+  } else {
+    release = await fetchLatestRelease(api);
+  }
   const asset = selectAsset(release, BETTERZALO_ASSET_PATTERNS);
   if (!asset) {
-    throw releaseFailed(api, `no BetterZalo distribution artifact found in ${release.tag}`);
+    throw releaseFailed(
+      api,
+      `no BetterZalo distribution artifact found in ${release.tag}`,
+      `Release ${release.tag} exists but ships no downloadable zip yet. A local package can be used offline with --package <dir>.`,
+    );
   }
-  return { release, asset };
+  return { release, asset, channel: want };
 }
 
 export async function zaPatchRelease() {

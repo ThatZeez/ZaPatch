@@ -2,11 +2,31 @@ import { loadConfig, saveConfig } from '../patcher/config.js';
 import { defaultInstallCandidates } from '../patcher/constants.js';
 import { findDefaultInstall, validateAndResolve } from '../patcher/detection.js';
 import { Codes, PatcherError } from '../patcher/errors.js';
+import { normalizeChannel } from '../patcher/release.js';
 import { ask } from './menu.js';
 import * as out from './output.js';
 
 function aborted() {
   return new PatcherError(Codes.ABORTED, 'Aborted by user.', '', 0);
+}
+
+// Build selection runs before installation selection: which BetterZalo
+// package line to use. An explicit --package dir skips this entirely
+// (a local build always wins). Defaults to stable without a terminal.
+export async function selectBuildChannel({ channelFlag = null, hasLocalPackage = false, signal = null } = {}) {
+  if (channelFlag) return normalizeChannel(channelFlag);
+  if (hasLocalPackage || !process.stdin.isTTY) return 'stable';
+  out.header('ZaPatch');
+  out.info('\nSelect BetterZalo build:\n');
+  out.info('[1] Stable (recommended)');
+  out.info('[2] Alpha / pre-release');
+  const raw = await ask('\nSelect an option: ', { signal });
+  if (raw === null) throw aborted();
+  const choice = raw.trim();
+  if (choice === '' || choice === '1') return 'stable';
+  if (choice === '2') return 'alpha';
+  out.warn('\nInvalid option. Please enter 1 or 2.');
+  return selectBuildChannel({ signal });
 }
 
 // Interactive installation selection. Resolves to an absolute dir

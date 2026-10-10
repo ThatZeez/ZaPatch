@@ -1,14 +1,16 @@
 import fs from 'node:fs/promises';
-import path from 'node:path';
+import { patchAsar } from './asar.js';
 import { createBackup, findLatestBackup } from './backup.js';
 import { Codes, PatcherError } from './errors.js';
+import { appAsarFor, asarPathFor, pickHookJs } from './patch.js';
 import { checkUpdateState } from './update.js';
 import { readReceipt, verifyAgainstReceipt } from './verification.js';
 import { checkCompatibility } from './version.js';
 
-// Targeted repair: only missing/corrupted BetterZalo files are reapplied.
-// This is deliberately NOT a reinstall: the original backup is preserved,
-// receipt metadata is kept, and intact files are never touched.
+// Targeted repair inside app.asar: only missing/corrupted BetterZalo
+// blobs (and the index.html hook when absent) are reapplied. This is
+// deliberately NOT a reinstall: the original backup is preserved,
+// receipt metadata is kept, and intact entries are never touched.
 export async function repairInstallation({ versionDir, installDir, zaloVersion, pkg, onStep = () => {}, signal = null }) {
   signal?.throwIfInterrupted?.('repair');
 
@@ -50,15 +52,16 @@ export async function repairInstallation({ versionDir, installDir, zaloVersion, 
   }
   onStep('Checking current installation', 'fail');
 
-  const broken = report.checks.filter((c) => !c.ok);
-  onStep(`Found ${broken.length} broken file(s)`, 'run');
+  const broken = report.checks.filter((c) => !c.ok && !c.file.endsWith(' hook'));
+  const hookBroken = report.checks.some((c) => !c.ok && c.file.endsWith(' hook'));
+  onStep(`Found ${broken.length + (hookBroken ? 1 : 0)} broken item(s)`, 'run');
 
   // The candidate package must match what the receipt describes, and must
   // support the current Zalo version.
   checkCompatibility(effectiveZalo, pkg);
-  const byDest = new Map(pkg.files.map((f) => [f.dest.replaceAll('\\', '/'), f]));
+  const byAsar = new Map(pkg.files.map((f) => [asarPathFor(f.dest), f]));
   for (const b of broken) {
-    if (!byDest.has(b.file)) {
+    if (!byAsar.has(b.file)) {
       throw new PatcherError(
         'PACKAGE_INVALID',
         `Installed file ${b.file} is not part of the candidate BetterZalo ${pkg.version} build.`,
@@ -69,17 +72,20 @@ export async function repairInstallation({ versionDir, installDir, zaloVersion, 
   }
 
   // Ensure a backup exists before touching anything. Prefer the original;
-  // only snapshot the current state when no backup exists at all.
+  // only snapshot the current asar when no backup exists at all.
+  const asarPath = appAsarFor(versionDir);
+  const asarRel = 'resources/app.asar';
   let backup = await findLatestBackup(installDir, receipt.zaloVersion).catch(() => null)
     || await findLatestBackup(installDir).catch(() => null);
   let backupCreated = null;
   if (!backup) {
     onStep('Creating safety backup', 'run');
-    const plan = broken.map((b) => ({
-      destRel: b.file,
-      destAbs: path.join(versionDir, b.file),
-    }));
-    backupCreated = await createBackup({ installDir, versionDir, zaloVersion: effectiveZalo, plan });
+    backupCreated = await createBackup({
+      installDir,
+      versionDir,
+      zaloVersion: effectiveZalo,
+      plan: [{ destRel: asarRel, destAbs: asarPath }],
+    });
     backup = backupCreated;
     onStep('Creating safety backup', 'ok');
   }
@@ -87,12 +93,23 @@ export async function repairInstallation({ versionDir, installDir, zaloVersion, 
   onStep('Repairing files', 'run');
   const repaired = [];
   try {
-    for (const b of broken) {
-      signal?.throwIfInterrupted?.('repair');
-      const src = byDest.get(b.file);
-      await fs.mkdir(path.dirname(path.join(versionDir, b.file)), { recursive: true });
-      await fs.copyFile(src.srcAbs, path.join(versionDir, b.file));
-      repaired.push(b.file);
+    signal?.throwIfInterrupted?.('repair');
+    if (broken.length > 0 || hookBroken) {
+      const blobs = [];
+      for (const b of broken) {
+        const src = byAsar.get(b.file);
+        blobs.push({ asarPath: b.file, data: await fs.readFile(src.srcAbs) });
+        repaired.push(b.file);
+      }
+      // patchAsar re-adds missing blobs and restores an absent hook;
+      // intact entries are left byte-identical.
+      await patchAsar({
+        asarPath,
+        addFiles: blobs,
+        hookJs: hookBroken ? receipt.hookJs || pickHookJs(pkg) : null,
+        signal,
+      });
+      if (hookBroken) repaired.push('pc-dist/index.html hook');
     }
   } catch (e) {
     onStep('Repairing files', 'fail');

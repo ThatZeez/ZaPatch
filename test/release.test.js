@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { fetchLatestRelease, resolveAssetSha256, selectAsset } from '../src/patcher/release.js';
+import { fetchLatestRelease, betterZaloRelease, resolveAssetSha256, selectAsset } from '../src/patcher/release.js';
 import { startFixtureServer } from './fixture-server.js';
 
 const FAKE_HEX = 'a'.repeat(64);
@@ -98,4 +98,85 @@ test('release lookup fails cleanly on 404 (no releases yet)', async () => {
   } finally {
     srv.close();
   }
+});
+
+function alphaFixture(base) {
+  return [
+    {
+      tag_name: 'v0.2.0',
+      name: 'BetterZalo 0.2.0',
+      prerelease: false,
+      assets: [
+        { name: 'BetterZalo-0.2.0-windows.zip', browser_download_url: `${base}/stable.zip`, size: 10 },
+      ],
+    },
+    {
+      tag_name: 'v0.3.0-alpha.1',
+      name: 'BetterZalo 0.3.0 alpha',
+      prerelease: true,
+      assets: [
+        { name: 'BetterZalo-0.3.0-alpha-windows.zip', browser_download_url: `${base}/alpha.zip`, size: 20, digest: `sha256:${'c'.repeat(64)}` },
+      ],
+    },
+  ];
+}
+
+test('alpha channel picks the latest pre-release', async () => {
+  const routes = new Map();
+  const srv = await startFixtureServer(routes);
+  const prev = process.env.BETTERZALO_RELEASE_API;
+  try {
+    routes.set('/releases?per_page=10', { body: JSON.stringify(alphaFixture(srv.base)), contentType: 'application/json' });
+    process.env.BETTERZALO_RELEASE_API = `${srv.base}/releases/latest`;
+    const { release, asset, channel } = await betterZaloRelease('alpha');
+    assert.equal(channel, 'alpha');
+    assert.equal(release.tag, 'v0.3.0-alpha.1');
+    assert.equal(asset.name, 'BetterZalo-0.3.0-alpha-windows.zip');
+  } finally {
+    if (prev === undefined) delete process.env.BETTERZALO_RELEASE_API;
+    else process.env.BETTERZALO_RELEASE_API = prev;
+    srv.close();
+  }
+});
+
+test('stable channel uses the latest endpoint', async () => {
+  const routes = new Map();
+  const srv = await startFixtureServer(routes);
+  const prev = process.env.BETTERZALO_RELEASE_API;
+  try {
+    routes.set('/releases/latest', {
+      body: JSON.stringify({ tag_name: 'v0.2.0', prerelease: false, assets: [{ name: 'BetterZalo-0.2.0-windows.zip', browser_download_url: `${srv.base}/s.zip`, digest: `sha256:${'d'.repeat(64)}` }] }),
+      contentType: 'application/json',
+    });
+    process.env.BETTERZALO_RELEASE_API = `${srv.base}/releases/latest`;
+    const { release, channel } = await betterZaloRelease('stable');
+    assert.equal(channel, 'stable');
+    assert.equal(release.tag, 'v0.2.0');
+  } finally {
+    if (prev === undefined) delete process.env.BETTERZALO_RELEASE_API;
+    else process.env.BETTERZALO_RELEASE_API = prev;
+    srv.close();
+  }
+});
+
+test('alpha channel fails clearly when no pre-release exists', async () => {
+  const routes = new Map();
+  const srv = await startFixtureServer(routes);
+  const prev = process.env.BETTERZALO_RELEASE_API;
+  try {
+    routes.set('/releases?per_page=10', {
+      body: JSON.stringify([{ tag_name: 'v0.2.0', prerelease: false, assets: [] }]),
+      contentType: 'application/json',
+    });
+    process.env.BETTERZALO_RELEASE_API = `${srv.base}/releases/latest`;
+    await assert.rejects(() => betterZaloRelease('alpha'), /no alpha\/pre-release build/);
+  } finally {
+    if (prev === undefined) delete process.env.BETTERZALO_RELEASE_API;
+    else process.env.BETTERZALO_RELEASE_API = prev;
+    srv.close();
+  }
+});
+
+test('unknown channel is rejected', async () => {
+  await assert.rejects(() => betterZaloRelease('beta'), /unknown build channel/);
 });

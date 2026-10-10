@@ -19,7 +19,7 @@ import { readReceipt, verifyAgainstReceipt } from '../patcher/verification.js';
 import { checkCompatibility, detectZaloVersion } from '../patcher/version.js';
 import { confirm } from './menu.js';
 import * as out from './output.js';
-import { selectInstallation } from './selection.js';
+import { selectBuildChannel, selectInstallation } from './selection.js';
 
 const COMMANDS = ['install', 'repair', 'uninstall', 'restore', 'update', 'status', 'version', 'menu'];
 
@@ -40,6 +40,7 @@ export function printHelp() {
   out.info('Options:');
   out.info('  --zalo-path <dir>   Use this Zalo installation directory (skip prompts)');
   out.info('  --package <dir>     Local BetterZalo package directory (offline install/repair)');
+  out.info('  --channel <name>    Build line: stable or alpha (install/repair, default: prompt or stable)');
   out.info('  --backup <id>       Backup id to restore (uninstall)');
   out.info('  --json              Machine-readable status output (status)');
   out.info('  --yes               Confirm without prompting (scripts)');
@@ -50,7 +51,7 @@ export function printHelp() {
 
 export function parseArgs(argv) {
   const args = argv.slice(2);
-  const opts = { command: null, zaloPath: null, pkg: null, backup: null, json: false, yes: false, noPause: false };
+  const opts = { command: null, zaloPath: null, pkg: null, channel: null, backup: null, json: false, yes: false, noPause: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if ((a === '--help' || a === '-h') && !opts.command) {
@@ -69,6 +70,10 @@ export function parseArgs(argv) {
       opts.backup = args[++i];
     } else if (a.startsWith('--backup=')) {
       opts.backup = a.slice('--backup='.length);
+    } else if (a === '--channel' && args[i + 1]) {
+      opts.channel = args[++i];
+    } else if (a.startsWith('--channel=')) {
+      opts.channel = a.slice('--channel='.length);
     } else if (a === '--json') {
       opts.json = true;
     } else if (a === '--yes' || a === '-y') {
@@ -114,21 +119,21 @@ function progressPrinter(label) {
 }
 
 // Obtains a verified BetterZalo package: explicit --package dir wins
-// (offline); otherwise the official GitHub release is downloaded,
-// verified, and cached for reuse.
-export async function resolveBetterZaloPackage({ pkgDirFlag, zaloVersion, logger, signal }) {
+// (offline); otherwise the official GitHub release for the selected
+// channel is downloaded, verified, and cached for reuse.
+export async function resolveBetterZaloPackage({ pkgDirFlag, channel = 'stable', zaloVersion, logger, signal }) {
   if (pkgDirFlag) {
     const pkg = await loadPackage(pkgDirFlag);
     await logger.info('local package loaded', { name: pkg.name, version: pkg.version, dir: pkg.dir });
-    return { pkg, cleanup: async () => {} };
+    return { pkg, channel: 'local', cleanup: async () => {} };
   }
 
-  const { release, asset } = await betterZaloRelease();
-  await logger.info('release found', { tag: release.tag, asset: asset.name });
-  out.info(`BetterZalo release: ${release.tag} (${asset.name})`);
+  const { release, asset, channel: resolved } = await betterZaloRelease(channel);
+  await logger.info('release found', { tag: release.tag, asset: asset.name, channel: resolved });
+  out.info(`BetterZalo ${resolved} release: ${release.tag} (${asset.name})`);
 
   const tagSlug = normalizeTag(release.tag).replace(/[^0-9A-Za-z._-]+/g, '_') || 'latest';
-  const cacheTarget = path.join(downloadCacheDir(), `betterzalo-${tagSlug}`);
+  const cacheTarget = path.join(downloadCacheDir(), `betterzalo-${resolved}-${tagSlug}`);
   const cached = await loadPackage(cacheTarget).catch(() => null);
   if (cached) {
     try {
@@ -157,7 +162,7 @@ export async function resolveBetterZaloPackage({ pkgDirFlag, zaloVersion, logger
   await fs.rename(workDir, cacheTarget).catch(() => {});
   const dir = await fs.stat(cacheTarget).then(() => cacheTarget).catch(() => workDir);
   await logger.info('artifact ready', { dir, version: pkg.version });
-  return { pkg, cleanup: () => cleanupWorkDir(dir === cacheTarget ? null : workDir) };
+  return { pkg, channel: resolved, cleanup: () => cleanupWorkDir(dir === cacheTarget ? null : workDir) };
 }
 
 async function ensureWritable(versionDir) {
@@ -183,33 +188,41 @@ async function ensureWritable(versionDir) {
 // --- Flows (shared by menu actions and subcommands) ---
 
 export async function flowInstall({ opts, logger, signal }) {
+  const channel = await selectBuildChannel({
+    channelFlag: opts.channel,
+    hasLocalPackage: !!opts.pkg,
+    signal,
+  });
   const inst = await resolveVerifiedInstallation(opts, logger, signal);
   await saveConfig(inst.installDir).catch(() => {});
   out.info(`\nDetecting Zalo...         ${out.c.green('OK')}`);
   out.info(`Zalo version: ${inst.zaloVersion} (${inst.versionSource})`);
 
-  const { pkg, cleanup } = await resolveBetterZaloPackage({
+  const { pkg, channel: resolved, cleanup } = await resolveBetterZaloPackage({
     pkgDirFlag: opts.pkg,
+    channel,
     zaloVersion: inst.zaloVersion,
     logger,
     signal,
   });
   try {
-    out.info(`BetterZalo build: ${pkg.name} ${pkg.version}`);
+    out.info(`BetterZalo build: ${pkg.name} ${pkg.version} (${resolved})`);
     checkCompatibility(inst.zaloVersion, pkg);
-    await logger.info('version check passed', { zalo: inst.zaloVersion, pkg: pkg.version });
+    await logger.info('version check passed', { zalo: inst.zaloVersion, pkg: pkg.version, channel: resolved });
     await ensureWritable(inst.versionDir);
 
     const { receipt, backup } = await applyPatch({
       versionDir: inst.versionDir,
       zaloVersion: inst.zaloVersion,
       pkg,
+      channel: resolved,
       onStep: steps(),
       signal,
     });
     await logger.info('installed', {
       zalo: inst.zaloVersion,
       package: `${pkg.name}@${pkg.version}`,
+      channel: resolved,
       backup: backup.id,
       files: receipt.files.length,
     });
@@ -225,8 +238,19 @@ export async function flowRepair({ opts, logger, signal }) {
   await saveConfig(inst.installDir).catch(() => {});
   out.info(`\nZalo version: ${inst.zaloVersion} (${inst.versionSource})`);
 
+  // Without an explicit flag, repair sticks to the channel the install
+  // came from so an alpha install is not "repaired" with a stable build.
+  // Only ask when there is no recorded channel to inherit.
+  const receipt = await readReceipt(inst.versionDir);
+  const channel = receipt?.channel && !opts.channel && !opts.pkg
+    ? receipt.channel
+    : await selectBuildChannel({ channelFlag: opts.channel, hasLocalPackage: !!opts.pkg, signal });
+  if (receipt?.channel && channel === receipt.channel && !opts.channel) {
+    out.info(`Repairing with the recorded ${channel} build line.`);
+  }
   const { pkg, cleanup } = await resolveBetterZaloPackage({
     pkgDirFlag: opts.pkg,
+    channel,
     zaloVersion: inst.zaloVersion,
     logger,
     signal,
@@ -408,7 +432,7 @@ async function cmdStatus(opts, logger, _signal) {
   out.info(`Zalo installation: ${status.installation}`);
   out.info(`Path:             ${status.installDir}`);
   out.info(`Zalo version:     ${status.zaloVersion ?? 'unknown'}${status.zaloVersionSource ? ` (${status.zaloVersionSource})` : ''}`);
-  out.info(`BetterZalo:       ${status.betterZalo}${status.packageVersion ? ` (${status.packageVersion})` : ''}`);
+  out.info(`BetterZalo:       ${status.betterZalo}${status.packageVersion ? ` (${status.packageVersion})` : ''}${status.channel ? ` [${status.channel}]` : ''}`);
   out.info(`Patch status:     ${status.patchStatus}`);
   out.info(`Backup:           ${status.backup}`);
   if (status.receiptZaloVersion && status.zaloVersion && status.receiptZaloVersion !== status.zaloVersion) {

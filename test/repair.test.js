@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { applyPatch } from '../src/patcher/patch.js';
+import { createAsar, extractFile, patchAsar } from '../src/patcher/asar.js';
+import { applyPatch, appAsarFor } from '../src/patcher/patch.js';
 import { loadPackage, sha256File } from '../src/patcher/package.js';
 import { repairInstallation } from '../src/patcher/repair.js';
 import { listBackups } from '../src/patcher/backup.js';
@@ -13,7 +14,11 @@ async function makeFakeInstall() {
   const versionDir = path.join(installDir, 'Zalo-26.9.10');
   await fs.mkdir(path.join(versionDir, 'resources'), { recursive: true });
   await fs.writeFile(path.join(versionDir, 'Zalo.exe'), 'exe');
-  await fs.writeFile(path.join(versionDir, 'resources', 'app.asar'), 'asar');
+  await createAsar(path.join(versionDir, 'resources', 'app.asar'), {
+    'package.json': JSON.stringify({ name: 'Zalo', main: 'bootstrap.js' }),
+    'pc-dist/index.html': '<html><body><script src="render.js"></script></body></html>',
+    'pc-dist/render.js': 'console.log("app");',
+  });
   return { installDir, versionDir };
 }
 
@@ -50,11 +55,12 @@ async function installFixture() {
   return { installDir, versionDir, pkg, pkgDir, backupId: installed.backup.id };
 }
 
-test('repair fixes only broken files and keeps the backup', async () => {
+test('repair fixes only broken asar entries and keeps the backup', async () => {
   const f = await installFixture();
   try {
-    // Corrupt one file, delete nothing else.
-    await fs.writeFile(path.join(f.versionDir, 'betterzalo', 'a.js'), 'corrupted');
+    // Corrupt one blob inside the asar, leave everything else intact.
+    const asarPath = appAsarFor(f.versionDir);
+    await patchAsar({ asarPath, addFiles: [{ asarPath: 'pc-dist/betterzalo/a.js', data: 'corrupted' }] });
     const result = await repairInstallation({
       versionDir: f.versionDir,
       installDir: f.installDir,
@@ -63,11 +69,12 @@ test('repair fixes only broken files and keeps the backup', async () => {
       onStep: () => {},
     });
     assert.equal(result.status, 'repaired');
-    assert.deepEqual(result.repaired, ['betterzalo/a.js']);
+    assert.deepEqual(result.repaired, ['pc-dist/betterzalo/a.js']);
     assert.equal(result.backupId, f.backupId);
     assert.equal((await listBackups(f.installDir)).length, 1);
-    assert.equal(await fs.readFile(path.join(f.versionDir, 'betterzalo', 'a.js'), 'utf8'), 'aaa');
-    assert.equal(await fs.readFile(path.join(f.versionDir, 'betterzalo', 'b.js'), 'utf8'), 'bbb');
+    assert.equal((await extractFile(asarPath, 'pc-dist/betterzalo/a.js')).toString(), 'aaa');
+    assert.equal((await extractFile(asarPath, 'pc-dist/betterzalo/b.js')).toString(), 'bbb');
+    assert.equal((await extractFile(asarPath, 'pc-dist/render.js')).toString(), 'console.log("app");');
   } finally {
     await fs.rm(f.installDir, { recursive: true, force: true });
     await fs.rm(f.pkgDir, { recursive: true, force: true });

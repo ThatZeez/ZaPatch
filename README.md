@@ -30,6 +30,10 @@ input falls back to a numbered prompt automatically.
 - `Install` picks the Zalo install (default detection or custom dir), downloads the
   official BetterZalo release, verifies SHA-256, checks Zalo compatibility, backs up,
   patches, and verifies. `--package <dir>` uses a local package instead (offline).
+  Before installation you choose the build line: `Stable` (latest full release)
+  or `Alpha` (latest pre-release, may be unstable); `--channel stable|alpha`
+  skips the prompt. Repair reuses the install's recorded build line unless
+  `--channel` overrides it.
 - `Repair` fixes only missing/corrupted files, preserves the original backup.
 - `Uninstall` restores original Zalo files from the verified backup (backup kept).
 - `Update ZaPatch` replaces `ZaPatch.exe` itself after checksum verification.
@@ -77,9 +81,18 @@ tag still matches and the package stays compatible.
 2. Obtain package (`--package` or release download → verify → extract).
 3. Compatibility check (explicit `supportedZaloVersions` list wins over min/max range).
 4. Writability check (clear elevation guidance on denial).
-5. Backup overwritten files to `<install>\.betterzalo\backups\<zalo>_<stamp>\` + manifest; verify hashes.
-6. Copy package files; write `.betterzalo/receipt.json` in the version dir.
-7. Re-verify hashes. Any failure rolls back from the backup.
+5. Back up `resources/app.asar` to `<install>\.betterzalo\backups\<zalo>_<stamp>\` + manifest; verify hashes.
+6. Patch inside the asar: package payload appended under `pc-dist/`, `pc-dist/index.html`
+   hooked with a `<script>` tag (CSP `'self'` allows same-archive scripts); write
+   `.betterzalo/receipt.json` in the version dir.
+7. Re-verify asar entries + hook. Any failure rolls back from the backup.
+
+Why inside the asar: Zalo's renderer (`pc-dist/index.html` + bundles, loaded via
+the `preload-render.js` context-isolated preload) lives entirely in
+`resources/app.asar`. Loose files next to `Zalo.exe` are never loaded, so
+installing there reports success while Zalo visibly never changes. No startup
+integrity check on asar contents was found in the shipped main bundle; the
+verified backup still allows full restore.
 
 Backups are never auto-deleted. No telemetry. No background work.
 
@@ -99,6 +112,7 @@ src/
     release.js       GitHub release query + artifact/checksum resolution
     download.js      https download with progress, hash, redirects, interrupt
     artifact.js      zip extraction (tar/Expand-Archive) -> verified package
+    asar.js          pure-Node asar read/patch/verify (append blobs + hook index.html)
     backup.js        backup create/verify/list
     patch.js         install pipeline + rollback (interrupt-aware)
     repair.js        targeted repair, keeps original backup
@@ -112,7 +126,6 @@ src/
     config.js        persisted install path
     logger.js        file logging (no sensitive data)
     constants.js     versions, paths, release APIs, exit codes
-BetterZalo-v0.1.0/   local BetterZalo build for offline --package use
 test/                node:test suites, temp dirs + fixture HTTP server
 ```
 

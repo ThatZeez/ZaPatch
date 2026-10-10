@@ -29,6 +29,7 @@ export async function getStatus(resolved) {
     zaloVersionSource: live.source,
     betterZalo,
     packageVersion: receipt ? `${receipt.packageName} ${receipt.packageVersion}` : null,
+    channel: receipt?.channel || null,
     receiptZaloVersion: receipt ? receipt.zaloVersion : null,
     patchStatus,
     backup: backups ? `Available (${backups.id})` : 'None',

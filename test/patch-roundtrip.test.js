@@ -3,19 +3,26 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { createAsar, extractFile } from '../src/patcher/asar.js';
 import { createBackup, listBackups } from '../src/patcher/backup.js';
 import { loadPackage, sha256File } from '../src/patcher/package.js';
-import { applyPatch } from '../src/patcher/patch.js';
+import { applyPatch, appAsarFor } from '../src/patcher/patch.js';
 import { restoreFromBackup } from '../src/patcher/restore.js';
 import { getStatus } from '../src/patcher/status.js';
 import { verifyAgainstReceipt } from '../src/patcher/verification.js';
 
+// Fake Zalo layout with a minimal REAL asar (package.json + renderer
+// page), so patch/verify/restore exercise the asar machinery.
 async function makeFakeInstall() {
   const installDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zaloinstall-'));
   const versionDir = path.join(installDir, 'Zalo-26.9.10');
   await fs.mkdir(path.join(versionDir, 'resources'), { recursive: true });
   await fs.writeFile(path.join(versionDir, 'Zalo.exe'), 'exe');
-  await fs.writeFile(path.join(versionDir, 'resources', 'app.asar'), 'asar');
+  await createAsar(path.join(versionDir, 'resources', 'app.asar'), {
+    'package.json': JSON.stringify({ name: 'Zalo', main: 'bootstrap.js' }),
+    'pc-dist/index.html': '<html><body><script src="render.js"></script></body></html>',
+    'pc-dist/render.js': 'console.log("app");',
+  });
   return { installDir, versionDir };
 }
 
@@ -40,19 +47,25 @@ async function makeFixturePackage() {
   return loadPackage(dir).then((pkg) => ({ pkg, dir }));
 }
 
-test('patch -> verify -> status -> restore roundtrip', async () => {
+test('patch -> verify -> status -> restore roundtrip (inside asar)', async () => {
   const { installDir, versionDir } = await makeFakeInstall();
-  // Pre-existing file that the patch will overwrite (backup path).
-  await fs.mkdir(path.join(versionDir, 'betterzalo'), { recursive: true });
-  await fs.writeFile(path.join(versionDir, 'betterzalo', 'betterzalo-core.js'), 'original');
-
   const { pkg, dir: pkgDir } = await makeFixturePackage();
   const { receipt, backup } = await applyPatch({ versionDir, zaloVersion: '26.9.10', pkg, onStep: () => {} });
 
   assert.equal(receipt.files.length, 1);
-  assert.equal(receipt.files[0].dest, 'betterzalo/betterzalo-core.js');
+  assert.equal(receipt.channel, 'stable');
+  assert.equal(receipt.asar, true);
+  assert.equal(receipt.files[0].asarPath, 'pc-dist/betterzalo/betterzalo-core.js');
   assert.ok((await listBackups(installDir)).length === 1);
   assert.equal(backup.manifest.zaloVersion, '26.9.10');
+  // Backup captured the whole app.asar.
+  assert.equal(backup.manifest.entries[0].path, 'resources/app.asar');
+
+  // Payload landed inside the asar; original renderer bytes intact.
+  const asarPath = appAsarFor(versionDir);
+  assert.equal((await extractFile(asarPath, 'pc-dist/betterzalo/betterzalo-core.js')).toString(), 'fixture-core');
+  assert.equal((await extractFile(asarPath, 'pc-dist/render.js')).toString(), 'console.log("app");');
+  assert.ok((await extractFile(asarPath, 'pc-dist/index.html')).toString().includes('betterzalo/betterzalo-core.js'));
 
   const v = await verifyAgainstReceipt({ versionDir });
   assert.equal(v.ok, true);
@@ -62,19 +75,9 @@ test('patch -> verify -> status -> restore roundtrip', async () => {
   assert.equal(status.patchStatus, 'Valid');
 
   const result = await restoreFromBackup({ versionDir, backup });
-  assert.ok(result.restored.includes('betterzalo/betterzalo-core.js'));
-  assert.equal(await fs.readFile(path.join(versionDir, 'betterzalo', 'betterzalo-core.js'), 'utf8'), 'original');
-  await fs.rm(installDir, { recursive: true, force: true });
-  await fs.rm(pkgDir, { recursive: true, force: true });
-});
-
-test('restore prunes empty BetterZalo dirs left by added files', async () => {
-  const { installDir, versionDir } = await makeFakeInstall();
-  const { pkg, dir: pkgDir } = await makeFixturePackage();
-  const { backup } = await applyPatch({ versionDir, zaloVersion: '26.9.10', pkg, onStep: () => {} });
-  // Added-only files vanish on restore, so the now-empty dir goes too.
-  await restoreFromBackup({ versionDir, backup });
-  assert.equal(await fs.stat(path.join(versionDir, 'betterzalo')).then(() => true).catch(() => false), false);
+  assert.ok(result.restored.includes('resources/app.asar'));
+  const after = await verifyAgainstReceipt({ versionDir });
+  assert.equal(after.ok, false);
   await fs.rm(installDir, { recursive: true, force: true });
   await fs.rm(pkgDir, { recursive: true, force: true });
 });

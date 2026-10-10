@@ -3,12 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { loadPackage } from '../src/patcher/package.js';
-
-function realPackageDir() {
-  return fileURLToPath(new URL('../BetterZalo-v0.1.0', import.meta.url));
-}
 
 async function writeFile(dir, rel, content) {
   const abs = path.join(dir, rel);
@@ -16,21 +11,6 @@ async function writeFile(dir, rel, content) {
   await fs.writeFile(abs, content);
   return abs;
 }
-
-test('loads the shipped BetterZalo-v0.1.0 package', async () => {
-  const pkg = await loadPackage(realPackageDir());
-  assert.equal(pkg.name, 'BetterZalo');
-  assert.equal(pkg.version, '0.1.0');
-  assert.deepEqual(pkg.supportedZaloVersions, ['26.9.10']);
-  assert.equal(pkg.files.length, 2);
-  // Install layout stays namespaced under betterzalo/.
-  const dests = pkg.files.map((f) => f.dest).sort();
-  assert.deepEqual(dests, [
-    'betterzalo/betterzalo-core.js',
-    'betterzalo/plugins/dont-track-me/dont-track-me.js',
-  ]);
-  for (const f of pkg.files) assert.ok(/^[0-9a-f]{64}$/.test(f.sha256));
-});
 
 test('legacy betterzalo-package.json still loads', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pkg-legacy-'));
