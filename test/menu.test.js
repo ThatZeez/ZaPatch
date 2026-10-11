@@ -41,8 +41,8 @@ const key = (name, extra = {}) => ({ name, ...extra });
 test('menu opens with the first option selected', () => {
   const lines = renderMenuBlock(MENU_ITEMS, 0);
   assert.equal(lines.length, MENU_ITEMS.length);
-  assert.equal(lines[0], `> ${UL}Install BetterZalo${RESET}`);
-  assert.equal(lines[1], '  Repair BetterZalo');
+  assert.equal(lines[0], `  > ${UL}Install BetterZalo${RESET}`);
+  assert.equal(lines[1], '    Repair BetterZalo');
 });
 
 test('down moves the selection and arrow+underline follow it', () => {
@@ -50,9 +50,9 @@ test('down moves the selection and arrow+underline follow it', () => {
   selected = moveIndex(selected, 'down', MENU_ITEMS.length);
   assert.equal(selected, 1);
   const lines = renderMenuBlock(MENU_ITEMS, selected);
-  assert.equal(lines[0], '  Install BetterZalo');
-  assert.equal(lines[1], `> ${UL}Repair BetterZalo${RESET}`);
-  assert.equal(lines[2], '  Uninstall BetterZalo');
+  assert.equal(lines[0], '    Install BetterZalo');
+  assert.equal(lines[1], `  > ${UL}Repair BetterZalo${RESET}`);
+  assert.equal(lines[2], '    Uninstall BetterZalo');
 });
 
 test('up moves the selection back', () => {
@@ -80,7 +80,7 @@ test('options map to the existing actions in order', () => {
 test('interactive rendering requires no numeric input', () => {
   for (let i = 0; i < MENU_ITEMS.length; i++) {
     for (const line of renderMenuBlock(MENU_ITEMS, i)) {
-      assert.match(line, /^(>|  )/);
+      assert.match(line, /^(↑|↓| ) [> ] /);
       assert.doesNotMatch(line, /\[\d\]/);
     }
   }
@@ -96,7 +96,7 @@ test('keypress down/down/up/enter selects the second option', async () => {
   stdin.emit('keypress', null, key('return'));
   assert.equal(await pending, 1);
   const screen = stdout.text();
-  assert.ok(screen.includes(`> ${UL}Repair BetterZalo${RESET}`));
+  assert.ok(screen.includes(`  > ${UL}Repair BetterZalo${RESET}`));
 });
 
 test('selection clamps at the last option', async () => {
@@ -128,9 +128,13 @@ test('ctrl+c interrupts and flags the signal', async () => {
 });
 
 // Minimal terminal emulator: \r \n SGR \x1b[nA \x1b[0K \x1b[J, wrap at width.
-function emulateScreen(writes, width) {
-  const rows = [''];
-  let r = 0;
+// `headRows` seeds pinned header lines above the menu so a redraw that
+// overshoots upward visibly destroys them instead of being clamped away.
+function emulateScreen(writes, width, headRows = 0) {
+  const rows = [];
+  for (let h = 0; h < headRows; h++) rows.push(`header ${h + 1}`);
+  rows.push('');
+  let r = headRows;
   let c = 0;
   const put = (ch) => {
     if (c >= width) {
@@ -173,7 +177,14 @@ function emulateScreen(writes, width) {
       i++;
     }
   }
-  return rows.map((x) => x.replace(/\s+$/, '')).filter((x, idx, arr) => !(x === '' && idx === arr.length - 1));
+  return rows
+    .map((x) => x.replace(/\s+$/, ''))
+    .filter((x, idx, arr) => !(x === '' && idx === arr.length - 1));
+}
+
+function expectScreenWithHeader(actual, options) {
+  assert.deepEqual(actual.slice(0, 3), ['header 1', 'header 2', 'header 3']);
+  assert.deepEqual(actual.slice(3), options);
 }
 
 test('long navigation leaves no stale option copies on screen', async () => {
@@ -185,13 +196,13 @@ test('long navigation leaves no stale option copies on screen', async () => {
     for (const name of seq) stdin.emit('keypress', null, key(name));
     stdin.emit('keypress', null, key('return'));
     assert.equal(await pending, 4);
-    const screen = emulateScreen(stdout.chunks, width);
-    assert.deepEqual(screen, [
-      '  Install BetterZalo',
-      '  Repair BetterZalo',
-      '  Uninstall BetterZalo',
-      '  Update ZaPatch',
-      '> Exit',
+    const screen = emulateScreen(stdout.chunks, width, 3);
+    expectScreenWithHeader(screen, [
+      '    Install BetterZalo',
+      '    Repair BetterZalo',
+      '    Uninstall BetterZalo',
+      '    Update ZaPatch',
+      '  > Exit',
     ]);
   }
 });
@@ -216,7 +227,7 @@ test('window never exceeds the list and short lists show fully', () => {
   assert.equal(initialWindow(0, 3, 10), 0);
   assert.deepEqual(
     renderMenuBlock(MANY.slice(0, 3), 0, 0, 3),
-    [`> ${UL}Option 1${RESET}`, '  Option 2', '  Option 3'],
+    [`  > ${UL}Option 1${RESET}`, '    Option 2', '    Option 3'],
   );
 });
 
@@ -226,11 +237,15 @@ test('viewport height adapts to terminal rows', () => {
   assert.equal(resolveViewportHeight({ rows: 5 }), 3);
 });
 
-test('header pins title and instructions', () => {
+test('header shows the hint and prompt lines', () => {
   const header = menuHeader();
-  assert.ok(header[0].includes('ZaPatch v'));
-  assert.ok(header.some((l) => l.includes('What would you like to do?')));
-  assert.ok(header.some((l) => l.includes('arrow keys')));
+  assert.equal(header.length, 2);
+  assert.ok(header[0].includes('Use the arrow keys to navigate: ↓ ↑ → ←'));
+  assert.ok(header[1].includes('?'));
+  assert.ok(header[1].includes('What would you like to do? (Press Enter to confirm):'));
+  // Blue ? and bold-white prompt text (FORCE_COLOR=1 is set above).
+  assert.ok(header[1].includes('\x1b[34m?'));
+  assert.ok(header[1].includes('\x1b[1;37mWhat would you like to do?'));
 });
 
 test('down-down-down-down-up-up-up-up round trip restores the viewport', async () => {
@@ -244,28 +259,78 @@ test('down-down-down-down-up-up-up-up round trip restores the viewport', async (
   assert.equal(await pending, 0);
   for (const width of [80, 40]) {
     // Emulator strips styling; underline verified on raw bytes below.
-    assert.deepEqual(emulateScreen(stdout.chunks, width), [
-      '> Option 1',
-      '  Option 2',
-      '  Option 3',
-      '  Option 4',
+    // Last row keeps ↓ (options 5-8 still hidden below).
+    expectScreenWithHeader(emulateScreen(stdout.chunks, width, 3), [
+      '  > Option 1',
+      '    Option 2',
+      '    Option 3',
+      '↓   Option 4',
     ]);
   }
-  assert.ok(stdout.text().includes(`> ${UL}Option 1${RESET}`));
+  assert.ok(stdout.text().includes(`  > ${UL}Option 1${RESET}`));
 });
 
-test('scrolled viewport shows the underline on the visible selection', async () => {
-  const stdin = fakeStdin();
+test('scrolled viewport shows the underline on the visible selection', async () => {  const stdin = fakeStdin();
   const stdout = fakeStdout();
   const pending = selectOption({ items: MANY, input: stdin, output: stdout, maxVisible: 4 });
   for (let i = 0; i < 5; i++) stdin.emit('keypress', null, key('down'));
   stdin.emit('keypress', null, key('return'));
   assert.equal(await pending, 5);
-  assert.deepEqual(emulateScreen(stdout.chunks, 80), [
-    '  Option 3',
-    '  Option 4',
-    '  Option 5',
-    '> Option 6',
+  expectScreenWithHeader(emulateScreen(stdout.chunks, 80, 3), [
+    '↑   Option 3',
+    '    Option 4',
+    '    Option 5',
+    '↓ > Option 6',
   ]);
-  assert.ok(stdout.text().includes(`> ${UL}Option 6${RESET}`));
+  assert.ok(stdout.text().includes(`↓ > ${UL}Option 6${RESET}`));
+});
+
+test('one-row window shows ↑ when options hide on both sides', () => {
+  // Window [3..4) of 8 items, selection 3: hidden above and below.
+  assert.deepEqual(renderMenuBlock(MANY, 3, 3, 4), [`↑ > ${UL}Option 4${RESET}`]);
+});
+
+test('default viewport is 5 rows on tall terminals', async () => {
+  const stdin = fakeStdin();
+  const stdout = fakeStdout(); // no rows -> adapted 14 -> capped to 5
+  const pending = selectOption({ items: MANY, input: stdin, output: stdout });
+  for (let i = 0; i < 7; i++) stdin.emit('keypress', null, key('down'));
+  stdin.emit('keypress', null, key('return'));
+  assert.equal(await pending, 7);
+  expectScreenWithHeader(emulateScreen(stdout.chunks, 80, 3), [
+    '↑   Option 4',
+    '    Option 5',
+    '    Option 6',
+    '    Option 7',
+    '  > Option 8',
+  ]);
+});
+
+test('no scroll indicators when the whole list fits', () => {
+  const lines = renderMenuBlock(MENU_ITEMS, 2);
+  assert.equal(lines.length, 5);
+  for (const line of lines) assert.match(line, /^  [> ] /);
+});
+
+test('footer renders below options and is never selectable', async () => {
+  const stdin = fakeStdin();
+  const stdout = fakeStdout();
+  const footer = ['', 'Update available!'];
+  const pending = selectOption({ items: MENU_ITEMS, input: stdin, output: stdout, footer });
+  stdin.emit('keypress', null, key('down'));
+  stdin.emit('keypress', null, key('down'));
+  stdin.emit('keypress', null, key('return'));
+  assert.equal(await pending, 2);
+  const screen = emulateScreen(stdout.chunks, 80, 0);
+  assert.deepEqual(screen.slice(-2), ['', 'Update available!']);
+  assert.equal(screen.filter((line) => line === 'Update available!').length, 1);
+});
+
+test('no footer means byte-identical output to before', async () => {
+  const stdin = fakeStdin();
+  const stdout = fakeStdout();
+  const pending = selectOption({ items: MENU_ITEMS, input: stdin, output: stdout });
+  stdin.emit('keypress', null, key('return'));
+  assert.equal(await pending, 0);
+  assert.ok(!stdout.text().includes('Update available!'));
 });

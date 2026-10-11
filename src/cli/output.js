@@ -12,6 +12,8 @@ function paint(code, s) {
 export const c = {
   bold: (s) => paint('1', s),
   underline: (s) => paint('4', s),
+  blue: (s) => paint('34', s),
+  boldWhite: (s) => paint('1;37', s),
   green: (s) => paint('32', s),
   red: (s) => paint('31', s),
   yellow: (s) => paint('33', s),
@@ -43,7 +45,6 @@ export function dim(msg) {
   console.log(c.dim(msg));
 }
 
-// Spec-style step line: `Detecting Zalo...         OK`
 export function step(name, status) {
   const pad = '.'.repeat(Math.max(2, 32 - name.length));
   if (status === 'ok') console.log(`${name} ${c.dim(pad)} ${c.green('OK')}`);

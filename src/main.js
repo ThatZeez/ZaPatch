@@ -27,7 +27,6 @@ try {
 
   const early = parseArgs(process.argv);
   if (!early.command) {
-    // Primary flow: interactive main menu.
     const { createLogger } = await import('./patcher/logger.js');
     const logger = createLogger();
     await logger.info('menu started', { version: PATCHER_VERSION });
@@ -60,7 +59,6 @@ try {
     const opts = parseArgs(process.argv);
     if (shouldPause(opts)) await pauseToClose().catch(() => {});
   } catch {
-    // never fail while reporting
   }
   process.exit(code);
 }

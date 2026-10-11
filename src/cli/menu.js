@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { EXIT, PATCHER_VERSION } from '../patcher/constants.js';
+import { checkSelfUpdate, updateNotice } from '../patcher/updater.js';
 import * as out from './output.js';
 
 export function ask(question, { signal = null } = {}) {
@@ -33,12 +34,7 @@ export async function confirm(question, { signal = null } = {}) {
 
 export async function pauseToClose() {
   if (!process.stdin.isTTY) return;
-  await ask('\nPress Enter to close ZaPatch...');
-}
-
-export async function pauseToMenu() {
-  if (!process.stdin.isTTY) return;
-  await ask('\nPress Enter to return to menu...');
+  await ask('\nPress Enter to exit...');
 }
 
 export const MENU_ITEMS = [
@@ -49,25 +45,32 @@ export const MENU_ITEMS = [
   { label: 'Exit', action: null },
 ];
 
-// Pure selection math (clamped to the available options).
 export function moveIndex(current, direction, count) {
   if (direction === 'up') return Math.max(0, current - 1);
   if (direction === 'down') return Math.min(count - 1, current + 1);
   return current;
 }
 
-// Pure rendering: `>` arrow plus a true underline directly beneath the
-// selected label text. The arrow and underline always move together
-// with `selected`. Only the [start, end) slice is rendered so the caller
-// can present a scrolling viewport of a longer list.
+// Pure rendering: fixed columns — col 0 scroll indicator (space/`↑`/`↓`),
+// col 1 space, col 2 `>`/space marker, col 3 space, label at col 4.
+// The selected label keeps real ANSI underlining; arrow and underline
+// always move together with `selected`. Only the [start, end) slice is
+// rendered so the caller can present a scrolling viewport.
+// `↑` shows on the first visible row when options hide above, `↓` on the
+// last visible row when options hide below (`↑` wins a 1-row window).
 export function renderMenuBlock(items, selected, start = 0, end = items.length) {
-  return items
-    .slice(start, end)
-    .map((item, i) => (start + i === selected ? `> ${out.c.underline(item.label)}` : `  ${item.label}`));
+  const stop = Math.min(end, items.length);
+  return items.slice(start, stop).map((item, i) => {
+    const idx = start + i;
+    const first = i === 0;
+    const last = i === stop - start - 1;
+    const indicator = first && start > 0 ? '↑' : last && stop < items.length ? '↓' : ' ';
+    const marker = idx === selected ? '>' : ' ';
+    const label = idx === selected ? out.c.underline(item.label) : item.label;
+    return `${indicator} ${marker} ${label}`;
+  });
 }
 
-// Pure viewport math: shift the visible window just enough to keep the
-// selection on screen. Scrolls both directions symmetrically.
 export function shiftWindow(start, selected, count, size) {
   const windowSize = Math.max(1, Math.min(size, count));
   if (selected < start) return selected;
@@ -80,8 +83,6 @@ export function initialWindow(selected, count, size) {
   return Math.max(0, Math.min(selected, count - windowSize));
 }
 
-// Viewport height adapts to the terminal; falls back to 24 rows when the
-// size is unknown (pipes, tests). `reserved` covers header/prompt/margin.
 export function resolveViewportHeight(stdout, { reserved = 10, min = 3 } = {}) {
   const rows = typeof stdout?.rows === 'number' && stdout.rows > 0 ? stdout.rows : 24;
   return Math.max(min, rows - reserved);
@@ -89,22 +90,16 @@ export function resolveViewportHeight(stdout, { reserved = 10, min = 3 } = {}) {
 
 export function menuHeader() {
   return [
-    out.c.dim(`ZaPatch v${PATCHER_VERSION} — Windows CLI`),
-    '',
-    'What would you like to do?',
-    'Use the arrow keys to navigate. Press Enter to confirm.',
-    '',
+    out.c.dim('Use the arrow keys to navigate: ↓ ↑ → ←'),
+    `${out.c.blue('?')} ${out.c.boldWhite('What would you like to do? (Press Enter to confirm):')}`,
   ];
 }
 
-// Keyboard selection inside a scrollable viewport: the header stays
-// pinned while only the visible option window is redrawn. Up/Down move,
-// Enter confirms, Esc/Ctrl+C cancels.
-// Falls back to a numbered prompt when stdin is not an interactive TTY
-// (pipes, scripts) since raw keypresses cannot be read there.
-// `input`/`output` are injectable for tests; they default to the console.
-// `maxVisible` caps the viewport height (defaults to terminal height).
-export async function selectOption({ prompt = '', header = null, items, initial = 0, signal = null, input = null, output = null, maxVisible = null }) {
+// Keyboard selection in a scrolling viewport (header pinned, only the
+// option window redrawn). Raw keypresses need a TTY, so pipes/scripts
+// get a numbered prompt; `input`/`output` injection is for tests.
+// `footer` lines redraw with the block but are never selectable.
+export async function selectOption({ prompt = '', header = null, items, initial = 0, signal = null, input = null, output = null, maxVisible = null, footer = [] }) {
   const stdin = input || process.stdin;
   const stdout = output || process.stdout;
   const headerLines = header || (prompt ? [prompt, ''] : []);
@@ -113,7 +108,7 @@ export async function selectOption({ prompt = '', header = null, items, initial 
   }
   if (signal?.interrupted) return null;
 
-  const viewSize = maxVisible || resolveViewportHeight(stdout);
+  const viewSize = maxVisible || Math.min(5, resolveViewportHeight(stdout));
   let selected = Math.min(Math.max(initial, 0), items.length - 1);
   let winStart = initialWindow(selected, items.length, viewSize);
   let blockLines = 0;
@@ -123,15 +118,16 @@ export async function selectOption({ prompt = '', header = null, items, initial 
 
   const draw = () => {
     const winEnd = Math.min(winStart + viewSize, items.length);
-    const lines = renderMenuBlock(items, selected, winStart, winEnd);
+    const lines = [...renderMenuBlock(items, selected, winStart, winEnd), ...footer];
     const body = lines.map((l) => `\x1b[0K${l}`).join('\r\n');
     if (blockLines === 0) {
       stdout.write(body);
     } else {
-      // Return to the viewport start and erase everything below it before
-      // rewriting, so a previously misaligned frame can never leave
-      // stale option copies accumulating on screen.
-      stdout.write(`\r\x1b[${blockLines}A\x1b[J${body}`);
+      // Cursor sits at the end of the last block row, so move up
+      // blockLines - 1 to land on the first block row (never into the
+      // pinned header above), then erase below and rewrite. Erasing from
+      // any higher would delete header lines more with every keypress.
+      stdout.write(`\r\x1b[${blockLines - 1}A\x1b[J${body}`);
     }
     blockLines = lines.length;
   };
@@ -147,7 +143,6 @@ export async function selectOption({ prompt = '', header = null, items, initial 
         if (typeof stdin.pause === 'function') stdin.pause();
         stdout.write('\x1b[?25h');
       } catch {
-        // cleanup must never break selection
       }
       resolve(value);
     };
@@ -202,35 +197,41 @@ async function fallbackNumbered(headerLines, items, signal) {
   return n - 1;
 }
 
-// Interactive primary flow. Each action runs in-process and returns to
-// the menu afterwards; the app only closes on Exit or Ctrl+C.
+async function updateFooter() {
+  const { latest } = await checkSelfUpdate({ timeout: 5000 });
+  const notice = updateNotice(PATCHER_VERSION, latest);
+  return notice ? ['', out.c.yellow(notice)] : [];
+}
+
+// Interactive primary flow: pick one action, run it, then pause and exit.
 export async function runMenu({ flows, logger, signal }) {
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    if (signal?.interrupted) return EXIT.INTERRUPTED;
-    const index = await selectOption({
-      header: menuHeader(),
-      items: MENU_ITEMS,
-      initial: 0,
-      signal,
-    });
-    if (index === null || MENU_ITEMS[index].action === null) {
-      console.log('\nGoodbye.');
-      return EXIT.OK;
-    }
-    const action = MENU_ITEMS[index].action;
-    try {
-      const code = await flows[action]({ signal });
-      await logger.info('menu action finished', { action, code });
-      if (signal?.interrupted) {
-        console.log('\nInterrupted. Returning to menu without finishing is safe; Repair can reconcile.');
-        signal.reset();
-      }
-    } catch (err) {
-      out.reportError(err && err.message ? err : new Error(String(err)));
-      await logger.error('menu action failed', { action, message: String(err?.message || err) });
-    }
-    await pauseToMenu();
-    if (signal?.interrupted) signal.reset();
+  if (signal?.interrupted) return EXIT.INTERRUPTED;
+  const footer = await updateFooter().catch(() => []);
+  const index = await selectOption({
+    header: menuHeader(),
+    items: MENU_ITEMS,
+    initial: 0,
+    signal,
+    footer,
+  });
+  if (index === null || MENU_ITEMS[index].action === null) {
+    console.log('\nGoodbye.');
+    return EXIT.OK;
   }
+  const action = MENU_ITEMS[index].action;
+  let code = EXIT.OK;
+  try {
+    code = await flows[action]({ signal });
+    await logger.info('menu action finished', { action, code });
+    if (signal?.interrupted) {
+      console.log('\nInterrupted. Partial changes were rolled back where possible.');
+      signal.reset();
+    }
+  } catch (err) {
+    out.reportError(err && err.message ? err : new Error(String(err)));
+    await logger.error('menu action failed', { action, message: String(err?.message || err) });
+    code = err && typeof err.exitCode === 'number' ? err.exitCode : EXIT.GENERIC;
+  }
+  await pauseToClose();
+  return code ?? EXIT.OK;
 }
