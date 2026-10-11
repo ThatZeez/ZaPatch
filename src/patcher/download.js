@@ -14,7 +14,6 @@ function clientFor(url) {
   return url.protocol === 'http:' ? http : https;
 }
 
-// Fetches a small text document (API JSON, .sha256 sidecars).
 export function fetchText(rawUrl, { headers = {}, timeout = 30000 } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(rawUrl);
@@ -63,8 +62,6 @@ export function fetchText(rawUrl, { headers = {}, timeout = 30000 } = {}) {
   });
 }
 
-// Downloads a file with optional progress, interruption, and SHA-256 check.
-// Reports progress as { downloaded, total } bytes; total may be null.
 export function downloadFile(rawUrl, destPath, { expectedSha256 = null, onProgress = null, signal = null } = {}) {
   return new Promise((resolve, reject) => {
     const attempt = (urlStr, redirects) => {
@@ -117,7 +114,6 @@ export function downloadFile(rawUrl, destPath, { expectedSha256 = null, onProgre
               try {
                 onProgress({ downloaded, total });
               } catch {
-                // progress display must never break the download
               }
             }
           });

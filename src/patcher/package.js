@@ -6,34 +6,15 @@ import { CHECKSUMS_NAME, NEW_MANIFEST_NAME, PACKAGE_MANIFEST_NAME } from './cons
 import { packageInvalid } from './errors.js';
 import { parseVersion } from './version.js';
 
-// BetterZalo package interface (directory-based).
-//
-// Supported manifest layouts (manifest.json preferred, legacy
-// betterzalo-package.json still accepted):
-//
-//   manifest.json (v1):
-//   {
-//     "manifestVersion": 1,
-//     "name": "BetterZalo",
-//     "version": "0.1.0",
-//     "supportedZaloVersions": ["26.9.10"],
-//     "files": [{ "path": "files/betterzalo-core.js",
-//                 "size": 29948,
-//                 "sha256": "<hex>" }]
-//   }
-//
-//   Each entry's `path` is relative to the package dir. Install location
-//   (`dest`, relative to the Zalo version dir) is explicit when the entry
-//   carries a "dest" field, otherwise it defaults to
-//   `betterzalo/<path-minus-leading-files-or-payload-prefix>`, which keeps
-//   all BetterZalo content in one collision-free directory.
-//
-// An adjacent checksums.txt ("<sha256>  <relpath>" per line, as produced
-// by `sha256sum`) is cross-checked when present.
-//
-// The patcher never needs BetterZalo internals: it copies declared files,
-// records sha256 hashes, and verifies them later. Future transports
-// (zip, signed feed) can reuse these manifest shapes.
+// BetterZalo package interface (directory-based). Supported layouts:
+// manifest.json (v1, preferred) or legacy betterzalo-package.json.
+// Example: { "manifestVersion": 1, "name": "BetterZalo", "version":
+// "0.1.0", "supportedZaloVersions": ["26.9.10"], "files":
+// [{ "path": "files/betterzalo-core.js", "size": 29948, "sha256": "<hex>" }] }
+// Entry `path` is package-relative; install `dest` defaults to
+// `betterzalo/<path-minus-leading-files-or-payload-prefix>`, and an
+// adjacent checksums.txt is cross-checked when present. The patcher only
+// copies declared files and verifies hashes — never BetterZalo internals.
 
 export function sha256File(absPath) {
   return new Promise((resolve, reject) => {
@@ -68,12 +49,9 @@ export async function loadPackage(packageDir) {
   throw packageInvalid(`no manifest found (looked for ${NEW_MANIFEST_NAME}, ${PACKAGE_MANIFEST_NAME}) in: ${abs}`);
 }
 
-// --- manifest.json layout ---
-
 function defaultDestFor(entryPath) {
-  // Strip one leading packaging-container segment ("files/", "payload/")
-  // so install layout is not polluted by it; everything lands namespaced
-  // under betterzalo/ and can never collide with Zalo's own files.
+  // Strip one leading "files/"/"payload/" segment so payloads land
+  // namespaced under betterzalo/, away from Zalo's own files.
   const fwd = entryPath.replaceAll('\\', '/');
   const stripped = /^(files|payload)\//.test(fwd) ? fwd.replace(/^(files|payload)\//, '') : fwd;
   return `betterzalo/${stripped}`;
@@ -142,7 +120,6 @@ async function loadModernPackage(abs, m) {
     files.push({ src: rel, dest, srcAbs, sha256: actual, size: st.size });
   }
 
-  // Cross-check checksums.txt when the package ships one.
   const sumsRaw = await fs.readFile(path.join(abs, CHECKSUMS_NAME), 'utf8').catch(() => null);
   if (sumsRaw !== null) {
     const sums = parseChecksums(sumsRaw);
@@ -166,8 +143,6 @@ async function loadModernPackage(abs, m) {
     files,
   };
 }
-
-// --- legacy betterzalo-package.json layout ---
 
 export async function loadLegacyPackage(abs, manifest) {
   validateLegacyShape(manifest);
@@ -218,9 +193,4 @@ export function validateLegacyShape(m) {
     if (seen.has(norm)) throw packageInvalid(`duplicate "dest" path: ${f.dest}`);
     seen.add(norm);
   }
-}
-
-// Kept for backwards compatibility; validates the legacy shape.
-export function validateManifestShape(m) {
-  return validateLegacyShape(m);
 }

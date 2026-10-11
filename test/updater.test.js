@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { applySelfUpdate, cleanupStaleBackup, isNewer, normalizeTag } from '../src/patcher/updater.js';
+import { applySelfUpdate, cleanupStaleBackup, isNewer, normalizeTag, updateNotice } from '../src/patcher/updater.js';
 import { startFixtureServer } from './fixture-server.js';
 
 test('version comparison handles v prefixes', () => {
@@ -11,6 +11,15 @@ test('version comparison handles v prefixes', () => {
   assert.equal(isNewer('0.2.0', '0.1.0'), true);
   assert.equal(isNewer('0.1.0', '0.2.0'), false);
   assert.equal(isNewer('0.1.0', '0.1.0'), false);
+});
+
+test('update notice appears only for newer releases', () => {
+  assert.equal(updateNotice('0.1.0', '0.1.0'), null);
+  assert.equal(updateNotice('0.2.0', '0.1.0'), null);
+  assert.equal(
+    updateNotice('0.1.0', 'v0.2.0'),
+    'ZaPatch v0.2.0 is available — pick "Update ZaPatch" to update.',
+  );
 });
 
 test('self-update swaps the exe and keeps .old until cleanup', async () => {

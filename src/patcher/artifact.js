@@ -6,14 +6,10 @@ import { NEW_MANIFEST_NAME } from './constants.js';
 import { packageInvalid } from './errors.js';
 import { loadPackage } from './package.js';
 
-// Turns a downloaded BetterZalo distribution archive into a loadable
-// package directory. Expected shape (provisional until the first real
-// BetterZalo release exists): a .zip whose root — or a single top-level
-// folder — contains manifest.json + checksums.txt + files/.
-//
-// Extraction uses Windows-native tools only (tar.exe, then
-// Expand-Archive): no new dependencies. Never executes anything from
-// the archive; only manifest.json/checksums.txt/payload files are read.
+// Downloaded BetterZalo zip -> loadable package dir. Expected shape
+// (provisional until the first real release): manifest.json +
+// checksums.txt + files/ at the root or one level down. Windows-native
+// extraction only; nothing from the archive is ever executed.
 
 function run(cmd, args, { env = null, timeout = 120000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -52,7 +48,6 @@ export async function extractZip(archivePath, destDir) {
 async function findPackageRoot(extractDir) {
   const isFile = (p) => fs.stat(p).then((s) => s.isFile()).catch(() => false);
   if (await isFile(path.join(extractDir, NEW_MANIFEST_NAME))) return extractDir;
-  // Single-root-folder zips: look one level down.
   const entries = await fs.readdir(extractDir, { withFileTypes: true }).catch(() => []);
   for (const e of entries) {
     if (!e.isDirectory()) continue;
@@ -63,8 +58,6 @@ async function findPackageRoot(extractDir) {
   throw packageInvalid(`extracted archive has no ${NEW_MANIFEST_NAME} at its root`);
 }
 
-// Full pipeline: extract -> locate root -> loadPackage (which verifies
-// sizes, per-file SHA-256, and checksums.txt when present).
 export async function packageFromArchive(archivePath, { workParent = null } = {}) {
   if (!archivePath.toLowerCase().endsWith('.zip')) {
     throw packageInvalid(`unsupported artifact format (expected .zip): ${path.basename(archivePath)}`);
@@ -77,7 +70,6 @@ export async function packageFromArchive(archivePath, { workParent = null } = {}
   return { pkg, dir: root, workDir };
 }
 
-// Best-effort cleanup of extraction temp dirs. Never throws.
 export async function cleanupWorkDir(workDir) {
   if (!workDir) return;
   await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});

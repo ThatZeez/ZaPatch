@@ -22,7 +22,6 @@ function backupDirName(zaloVersion, date = new Date()) {
   return `${safe}_${stamp}`;
 }
 
-// plan: [{ destAbs, destRel }] relative to the version dir.
 export async function createBackup({ installDir, versionDir, zaloVersion, plan }) {
   const root = backupsRootFor(installDir);
   const id = backupDirName(zaloVersion);
@@ -50,7 +49,6 @@ export async function createBackup({ installDir, versionDir, zaloVersion, plan }
       entries,
     };
     await fs.writeFile(path.join(dir, BACKUP_MANIFEST_NAME), JSON.stringify(manifest, null, 2), 'utf8');
-    // Verify: every backed-up file re-hashes to the recorded value.
     for (const e of entries) {
       if (!e.existed) continue;
       const actual = await hashFile(path.join(dir, 'files', e.path));
@@ -77,7 +75,6 @@ export async function listBackups(installDir) {
     try {
       out.push({ id: e.name, dir: path.join(root, e.name), manifest: JSON.parse(raw) });
     } catch {
-      // skip corrupt manifests
     }
   }
   out.sort((a, b) => (a.id < b.id ? 1 : -1));

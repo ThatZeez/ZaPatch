@@ -27,5 +27,6 @@ Windows-only CLI patcher for BetterZalo, shipped as standalone `ZaPatch.exe`
 - Self-update swaps exe->.old (never brick); `.old` removed on next start.
 - Status reports only verifiable facts (receipt + hashes + live version).
 - Non-zero exit codes per `src/patcher/constants.js:EXIT`; pause-to-close in TTY unless `--no-pause`.
+- Comments explain why, never what. Delete comments that restate the code, section banners, and dead code next to them; keep reverse-engineered notes, safety rationale, and non-obvious contracts.
 - Keep modules small, no new abstraction layers, no external deps without request.
 - Tests: `node --test test/*.test.js` with temp dirs + fixture HTTP server; never touch the real Zalo install.

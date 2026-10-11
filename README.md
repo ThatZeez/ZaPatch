@@ -12,17 +12,18 @@ Ships as a standalone **`ZaPatch.exe`** (no Node.js required for end users).
 
 ## For users (ZaPatch.exe)
 
+The main menu is an arrow-key list (no title art):
+
 ```text
-ZaPatch v0.1.0 — Windows CLI
-
-What would you like to do?
-Use the arrow keys to navigate. Press Enter to confirm.
-
-> Install BetterZalo   <- underlined
-  Repair BetterZalo
-  Uninstall BetterZalo
-  Update ZaPatch
+Use the arrow keys to navigate: ↓ ↑ → ←                     <- dim
+? What would you like to do? (Press Enter to confirm):      <- blue ? + bold
+  > Install BetterZalo   <- underlined
+    Repair BetterZalo
+    Uninstall BetterZalo
+    Update ZaPatch
 ```
+Navigate with `↑`/`↓`, confirm with `Enter` (`Esc` cancels). Piped/non-TTY
+input falls back to a numbered prompt automatically.
 
 Navigate with `↑`/`↓`, confirm with `Enter` (`Esc` cancels). Piped/non-TTY
 input falls back to a numbered prompt automatically.

@@ -40,8 +40,7 @@ export const PACKAGE_MANIFEST_NAME = 'betterzalo-package.json';
 export const NEW_MANIFEST_NAME = 'manifest.json';
 export const CHECKSUMS_NAME = 'checksums.txt';
 
-// Official release sources. betterzalo-package consumption stays
-// directory-based, but the primary install path is now the GitHub
+// Official release sources: the primary install path is the GitHub
 // release artifact (a zip containing manifest.json + payload).
 export function betterZaloReleaseApi() {
   return process.env.BETTERZALO_RELEASE_API || 'https://api.github.com/repos/ThatZeez/BetterZalo/releases/latest';
@@ -52,8 +51,7 @@ export function zaPatchReleaseApi() {
 }
 
 // Preferred BetterZalo artifact names, in order. Provisional until the
-// first real BetterZalo release exists (the API 404s as of v0.1.0);
-// patterns are checked in order so packaging can evolve.
+// first real release exists; checked in order so packaging can evolve.
 export const BETTERZALO_ASSET_PATTERNS = [
   /betterzalo.*windows.*\.zip$/i,
   /betterzalo.*\.zip$/i,
@@ -69,8 +67,7 @@ export function downloadCacheDir() {
   return path.join(configDir(), 'cache');
 }
 
-// Candidate default Zalo locations, checked in order. Never assume one
-// hardcoded path: users install via different packages/scopes.
+// Candidate default Zalo locations, checked in order.
 export function defaultInstallCandidates() {
   const out = [];
   const localAppData = process.env.LOCALAPPDATA;

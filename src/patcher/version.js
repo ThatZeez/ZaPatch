@@ -84,7 +84,7 @@ export function checkCompatibility(zaloVersion, pkg) {
   if (!zaloVersion) {
     throw unsupportedVersion('unknown', pkg.minZaloVersion || null, pkg.maxZaloVersion || null);
   }
-  // Explicit per-version list wins over the min/max range when present.
+  // Explicit list wins over the min/max range when present.
   if (Array.isArray(pkg.supportedZaloVersions) && pkg.supportedZaloVersions.length > 0) {
     const ok = pkg.supportedZaloVersions.some((entry) => versionMatchesEntry(zaloVersion, entry));
     if (!ok) {
@@ -100,9 +100,7 @@ export function checkCompatibility(zaloVersion, pkg) {
   return true;
 }
 
-// Matches a live Zalo version against one supported-versions entry.
-// Tolerates 4-part Windows FileVersions ("26.9.10.2959") against 3-part
-// entries ("26.9.10") by comparing the leading parts.
+// Tolerates 4-part FileVersions ("26.9.10.2959") against 3-part entries.
 export function versionMatchesEntry(live, entry) {
   if (live === entry) return true;
   if (typeof live === 'string' && typeof entry === 'string' && live.startsWith(entry + '.')) return true;
