@@ -3,16 +3,11 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { packageInvalid } from './errors.js';
 
-// Pure-Node asar reader/patcher (stdlib only).
-//
-// Verified against Zalo 26.9.10's app.asar: 16-byte prelude, JSON header
-// (UTF-8) describing every file as {size, offset} where offset counts
-// from the end of the header, then concatenated file bytes.
-//
-// Patch strategy: appended blobs + rebuilt header. Existing bytes are
-// copied verbatim; every old offset stays valid (see patchAsar).
-// The file is written to a temp path and renamed over the original so a
-// crash never leaves a half-written asar.
+// Pure-Node asar reader/patcher (stdlib only), verified against Zalo
+// 26.9.10's app.asar: 16-byte prelude, JSON header ({size, offset} per
+// file, offsets from end of header), then concatenated file bytes.
+// Appends blobs + rebuilds the header; old bytes copy verbatim so old
+// offsets stay valid. Temp file + rename, never a half-written asar.
 
 export const HOOK_MARKER = '<!-- BetterZalo -->';
 
@@ -40,14 +35,15 @@ export async function readHeader(asarPath) {
     if (!header || typeof header !== 'object' || !header.files) {
       throw packageInvalid(`not an asar archive (no file table): ${path.basename(asarPath)}`);
     }
-    return { header, headerSize, dataBase: 16 + headerSize };
+    // Data starts after both pickles: 8 + inner total (u32@4). The JSON
+    // itself is 4-byte aligned; never assume 16 + headerSize.
+    return { header, headerSize, dataBase: 8 + pre.readUInt32LE(4) };
   } finally {
     await fh.close().catch(() => {});
   }
 }
 
-export function findEntry(header, asarRel) {
-  const parts = normalizeRel(asarRel).split('/').filter(Boolean);
+export function findEntry(header, asarRel) {  const parts = normalizeRel(asarRel).split('/').filter(Boolean);
   let node = header;
   for (const p of parts) {
     node = node.files ? node.files[p] : undefined;
@@ -72,8 +68,7 @@ export async function extractFile(asarPath, asarRel, { header: known = null, dat
 
 export function listFiles(header) {
   const out = [];
-  const walk = (node, prefix) => {
-    for (const [k, v] of Object.entries(node.files || {})) {
+  const walk = (node, prefix) => {    for (const [k, v] of Object.entries(node.files || {})) {
       const p = prefix + '/' + k;
       if (v.files) walk(v, p);
       else out.push(p.slice(1));
@@ -101,8 +96,20 @@ function headerByteSize(header) {
   return Buffer.byteLength(JSON.stringify(header), 'utf8');
 }
 
-// Builds a minimal asar from a {asarRelPath: Buffer|string} map.
-// Used by tests; the real patch path is patchAsar() below.
+// Canonical nested-pickle prelude: outer size 4, inner total, inner
+// size, JSON size; JSON padded to 4 bytes; data at 8 + inner total.
+// Byte-identical in structure to asars Electron ships.
+export function preludeFor(headerSize) {
+  const pad = (4 - (headerSize % 4)) % 4;
+  const prelude = Buffer.alloc(16);
+  prelude.writeUInt32LE(4, 0);
+  prelude.writeUInt32LE(8 + headerSize + pad, 4);
+  prelude.writeUInt32LE(4 + headerSize + pad, 8);
+  prelude.writeUInt32LE(headerSize, 12);
+  return { prelude, pad, dataBase: 8 + prelude.readUInt32LE(4) };
+}
+
+// Minimal asar builder (test fixtures use it; patching is patchAsar).
 export async function createAsar(destPath, filesMap) {
   const header = { files: {} };
   let offset = 0;
@@ -115,16 +122,13 @@ export async function createAsar(destPath, filesMap) {
   }
   const headerStr = JSON.stringify(header);
   const headerSize = Buffer.byteLength(headerStr);
-  const prelude = Buffer.alloc(16);
-  prelude.writeUInt32LE(8 + headerSize, 0);
-  prelude.writeUInt32LE(8 + headerSize, 4);
-  prelude.writeUInt32LE(headerSize, 8);
-  prelude.writeUInt32LE(headerSize, 12);
+  const { prelude, pad, dataBase } = preludeFor(headerSize);
   const fh = await fs.open(destPath, 'w');
   try {
     await fh.write(prelude, 0, 16, 0);
     await fh.write(Buffer.from(headerStr, 'utf8'), 0, headerSize, 16);
-    let pos = 16 + headerSize;
+    if (pad) await fh.write(Buffer.alloc(pad), 0, pad, 16 + headerSize);
+    let pos = dataBase;
     for (const b of blobs) {
       await fh.write(b, 0, b.length, pos);
       pos += b.length;
@@ -135,7 +139,7 @@ export async function createAsar(destPath, filesMap) {
   return { headerSize, files: Object.keys(filesMap).length };
 }
 
-// Renders the <script> hook tag for an asar-internal JS path, relative to
+// <script> hook tag for an asar-internal JS path, relative to
 // pc-dist/index.html (both live under pc-dist/).
 export function hookTagFor(asarJsPath) {
   const rel = normalizeRel(asarJsPath).replace(/^pc-dist\//, '');
@@ -150,16 +154,14 @@ export function insertHook(html, hookTag) {
   return { html: html.slice(0, idx) + hookTag + html.slice(idx), inserted: true };
 }
 
-// Patches an asar: appends new blobs, rewrites index.html with the hook,
-// rebuilds the header. Old entries keep their offsets: offsets count
-// from the end of the header, and the old data block is copied verbatim
-// right after the new header, so old relative offsets stay valid. Only
-// the appended blobs get fresh offsets. Atomic via temp + rename.
+// Appends new blobs, rewrites index.html with the hook. Old entries keep
+// their offsets (old block copies verbatim after the new header); only
+// appended blobs get fresh offsets. Atomic via temp + rename.
 export async function patchAsar({ asarPath, addFiles = [], indexHtml = 'pc-dist/index.html', hookJs = null, signal = null }) {
   const { header, headerSize, dataBase } = await readHeader(asarPath);
   signal?.throwIfInterrupted?.('patch');
 
-  // Deep-clone the header so the original stays intact on failure.
+  // Deep-clone: the original header must survive a failed patch.
   const next = JSON.parse(JSON.stringify(header));
 
   const blobs = [];
@@ -182,7 +184,6 @@ export async function patchAsar({ asarPath, addFiles = [], indexHtml = 'pc-dist/
     else htmlBuf = null; // already hooked: leave bytes untouched
   }
 
-  // New data layout: old block verbatim, then additions, then index.html.
   const oldDataSize = (await fs.stat(asarPath)).size - dataBase;
   const additions = [...blobs.map((b) => ({ rel: b.rel, buf: b.buf }))];
   if (htmlBuf) additions.push({ rel: normalizeRel(indexHtml), buf: htmlBuf, replace: true });
@@ -208,11 +209,7 @@ export async function patchAsar({ asarPath, addFiles = [], indexHtml = 'pc-dist/
 async function writeAsar(asarPath, finalHeader, newHeaderSize, oldDataSize, oldDataBase, newBlobs, signal) {
   const tmpPath = `${asarPath}.zapatch-new`;
   await fs.rm(tmpPath, { force: true }).catch(() => {});
-  const prelude = Buffer.alloc(16);
-  prelude.writeUInt32LE(8 + newHeaderSize, 0);
-  prelude.writeUInt32LE(8 + newHeaderSize, 4);
-  prelude.writeUInt32LE(newHeaderSize, 8);
-  prelude.writeUInt32LE(newHeaderSize, 12);
+  const { prelude, pad } = preludeFor(newHeaderSize);
   const out = createWriteStream(tmpPath);
   try {
     await new Promise((resolve, reject) => {
@@ -220,6 +217,7 @@ async function writeAsar(asarPath, finalHeader, newHeaderSize, oldDataSize, oldD
       out.on('finish', resolve);
       out.write(prelude);
       out.write(Buffer.from(finalHeader, 'utf8'));
+      if (pad) out.write(Buffer.alloc(pad));
       const inp = createReadStream(asarPath, { start: oldDataBase, end: oldDataBase + oldDataSize - 1 });
       inp.on('error', reject);
       inp.pipe(out, { end: false });
@@ -234,11 +232,20 @@ async function writeAsar(asarPath, finalHeader, newHeaderSize, oldDataSize, oldD
     await fs.rm(tmpPath, { force: true }).catch(() => {});
     throw e.code === 'INTERRUPTED' ? e : packageInvalid(`asar rewrite failed: ${e.message}`);
   }
-  await fs.rename(tmpPath, asarPath);
+  try {
+    await fs.rename(tmpPath, asarPath);
+  } catch (e) {
+    // The original asar is untouched at this point; the temp file is left
+    // for inspection and removed on the next run. A lock (running Zalo)
+    // is by far the most common cause on Windows.
+    if (e.code === 'EPERM' || e.code === 'EACCES' || e.code === 'EBUSY') {
+      const { permissionDenied } = await import('./errors.js');
+      throw permissionDenied(asarPath, 'Close Zalo completely (check the system tray) and retry. The original app.asar was not modified.');
+    }
+    throw packageInvalid(`asar replace failed: ${e.message}`);
+  }
 }
 
-// Verifies a patched asar: entries exist with expected sizes/hashes and
-// the index.html hook is present.
 export async function verifyPatchedAsar(asarPath, { expectFiles = [], hookMarker = HOOK_MARKER } = {}) {
   const crypto = await import('node:crypto');
   const { header, dataBase } = await readHeader(asarPath);

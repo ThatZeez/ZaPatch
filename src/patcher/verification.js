@@ -4,10 +4,9 @@ import { extractFile, readHeader } from './asar.js';
 import { receiptPathFor, stateDirFor } from './constants.js';
 import { appAsarFor } from './patch.js';
 
-// Verifies a patched installation against its receipt: every recorded
-// asar-internal file must exist with a matching sha256, and the
-// index.html hook must be present. Legacy (loose-file) receipts without
-// asar entries report Invalid so repair/install takes over.
+// Every recorded asar file must hash-match and the index.html hook must
+// be present. Legacy (loose-file) receipts report Invalid so a reinstall
+// migrates them.
 export async function verifyAgainstReceipt({ versionDir, receipt = null }) {
   const receiptPath = receiptPathFor(versionDir);
   const rec = receipt || (await fs.readFile(receiptPath, 'utf8').then(JSON.parse).catch(() => null));

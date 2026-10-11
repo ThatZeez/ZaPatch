@@ -1,33 +1,28 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { extractFile, patchAsar, verifyPatchedAsar } from './asar.js';
+import { patchAsar, verifyPatchedAsar } from './asar.js';
 import { createBackup } from './backup.js';
 import { PATCHER_VERSION, receiptPathFor, stateDirFor } from './constants.js';
 import { patchFailed, permissionDenied } from './errors.js';
 
-// Full patch pipeline:
-// verify files -> backup app.asar -> patch asar -> verify -> report.
-// Rolls back from the verified backup when the apply step fails.
+// Full patch pipeline: verify files -> backup app.asar -> patch asar ->
+// verify -> report. Rolls back from the verified backup on failure.
 //
-// Why inside the asar: Zalo's renderer (pc-dist/index.html + bundles)
-// and preloads all live inside resources/app.asar. Loose files next to
-// Zalo.exe are never loaded, which is why installs used to report
-// success while Zalo visibly never changed. The patch appends the
-// package payload under pc-dist/ and hooks index.html with a
-// <script> tag (CSP 'self' allows same-archive file scripts).
+// Zalo's renderer lives entirely inside resources/app.asar, so loose
+// files next to Zalo.exe are never loaded — installs there reported
+// success while Zalo visibly never changed. Payload goes under pc-dist/
+// with an index.html <script> hook (CSP 'self' allows same-archive scripts).
 
 export function appAsarFor(versionDir) {
   return path.join(versionDir, 'resources', 'app.asar');
 }
 
-// Package `dest` paths resolve inside the asar under pc-dist/, next to
-// the index.html that references them.
+// Package `dest` paths resolve inside the asar under pc-dist/.
 export function asarPathFor(dest) {
   return 'pc-dist/' + String(dest).replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '');
 }
 
-// The index.html hook loads the core framework file: the package file
-// whose name is betterzalo-core.js, else the first shipped .js file.
+// Hook loads betterzalo-core.js when present, else the first .js file.
 export function pickHookJs(pkg) {
   const core = pkg.files.find((f) => f.dest.replaceAll('\\', '/').split('/').pop() === 'betterzalo-core.js');
   const chosen = core || pkg.files.find((f) => f.dest.toLowerCase().endsWith('.js'));
@@ -125,9 +120,4 @@ async function rollbackAsar({ versionDir, backup }) {
     await fs.copyFile(path.join(backup.dir, 'files', entry.path), path.join(versionDir, entry.path)).catch(() => {});
   }
   await fs.rm(receiptPathFor(versionDir), { force: true }).catch(() => {});
-}
-
-// Reads one patched file back out of the asar (repair/diagnostics).
-export async function readPatchedFile(versionDir, asarRel) {
-  return extractFile(appAsarFor(versionDir), asarRel);
 }

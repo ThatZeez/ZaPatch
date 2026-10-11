@@ -29,6 +29,74 @@ test('create + read + extract roundtrip', async () => {
   }
 });
 
+// Strict reader emulating Chromium/node-asar Pickle semantics: the first
+// 8 bytes are an outer pickle holding the inner total, the next bytes an
+// inner pickle holding the JSON size + string, and the data base is
+// 8 + inner total. Anything else and Electron cannot open the archive.
+async function strictReadHeader(asarPath) {
+  const fh = await fs.open(asarPath, 'r');
+  try {
+    const pre = Buffer.alloc(16);
+    await fh.read(pre, 0, 16, 0);
+    const outerSize = pre.readUInt32LE(0);
+    if (outerSize !== 4) throw new Error(`outer pickle size must be 4, got ${outerSize}`);
+    const innerTotal = pre.readUInt32LE(4);
+    const innerSize = pre.readUInt32LE(8);
+    const jsonSize = pre.readUInt32LE(12);
+    const pad = (4 - (jsonSize % 4)) % 4;
+    assert.equal(innerSize, 4 + jsonSize + pad);
+    assert.equal(innerTotal, 4 + innerSize);
+    const jb = Buffer.alloc(jsonSize);
+    await fh.read(jb, 0, jsonSize, 16);
+    return { header: JSON.parse(jb.toString('utf8')), dataBase: 8 + innerTotal };
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+async function strictExtract(asarPath, rel) {
+  const { header, dataBase } = await strictReadHeader(asarPath);
+  const parts = rel.split('/');
+  let node = header;
+  for (const p of parts) node = node.files ? node.files[p] : undefined;
+  assert.ok(node && !node.files, `missing: ${rel}`);
+  const fh = await fs.open(asarPath, 'r');
+  try {
+    const buf = Buffer.alloc(node.size);
+    await fh.read(buf, 0, node.size, dataBase + parseInt(node.offset, 10));
+    return buf;
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+test('writer emits canonical nested-pickle prelude', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'asar-'));
+  try {
+    const asarPath = await fixtureAsar(dir);
+    await strictReadHeader(asarPath);
+    assert.equal((await strictExtract(asarPath, 'pc-dist/render.js')).toString(), 'console.log("app");');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('patched asar stays strictly readable', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'asar-'));
+  try {
+    const asarPath = await fixtureAsar(dir);
+    await patchAsar({
+      asarPath,
+      addFiles: [{ asarPath: 'pc-dist/betterzalo/betterzalo-core.js', data: '/* bz */' }],
+      hookJs: 'pc-dist/betterzalo/betterzalo-core.js',
+    });
+    assert.equal((await strictExtract(asarPath, 'pc-dist/render.js')).toString(), 'console.log("app");');
+    assert.equal((await strictExtract(asarPath, 'pc-dist/betterzalo/betterzalo-core.js')).toString(), '/* bz */');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('patch adds blobs, hooks index.html, preserves old bytes', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'asar-'));
   try {

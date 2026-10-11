@@ -7,10 +7,9 @@ import { checkUpdateState } from './update.js';
 import { readReceipt, verifyAgainstReceipt } from './verification.js';
 import { checkCompatibility } from './version.js';
 
-// Targeted repair inside app.asar: only missing/corrupted BetterZalo
-// blobs (and the index.html hook when absent) are reapplied. This is
-// deliberately NOT a reinstall: the original backup is preserved,
-// receipt metadata is kept, and intact entries are never touched.
+// Targeted asar repair: only missing/corrupted blobs (and an absent hook)
+// are reapplied. Not a reinstall: the original backup and receipt survive,
+// intact entries are never touched.
 export async function repairInstallation({ versionDir, installDir, zaloVersion, pkg, onStep = () => {}, signal = null }) {
   signal?.throwIfInterrupted?.('repair');
 
@@ -56,8 +55,6 @@ export async function repairInstallation({ versionDir, installDir, zaloVersion, 
   const hookBroken = report.checks.some((c) => !c.ok && c.file.endsWith(' hook'));
   onStep(`Found ${broken.length + (hookBroken ? 1 : 0)} broken item(s)`, 'run');
 
-  // The candidate package must match what the receipt describes, and must
-  // support the current Zalo version.
   checkCompatibility(effectiveZalo, pkg);
   const byAsar = new Map(pkg.files.map((f) => [asarPathFor(f.dest), f]));
   for (const b of broken) {
@@ -71,8 +68,7 @@ export async function repairInstallation({ versionDir, installDir, zaloVersion, 
     }
   }
 
-  // Ensure a backup exists before touching anything. Prefer the original;
-  // only snapshot the current asar when no backup exists at all.
+  // Prefer the original backup; snapshot the current asar only when none exists.
   const asarPath = appAsarFor(versionDir);
   const asarRel = 'resources/app.asar';
   let backup = await findLatestBackup(installDir, receipt.zaloVersion).catch(() => null)
@@ -101,8 +97,6 @@ export async function repairInstallation({ versionDir, installDir, zaloVersion, 
         blobs.push({ asarPath: b.file, data: await fs.readFile(src.srcAbs) });
         repaired.push(b.file);
       }
-      // patchAsar re-adds missing blobs and restores an absent hook;
-      // intact entries are left byte-identical.
       await patchAsar({
         asarPath,
         addFiles: blobs,

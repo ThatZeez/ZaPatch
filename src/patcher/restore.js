@@ -23,7 +23,6 @@ export async function restoreFromBackup({ versionDir, backup }) {
         removed.push(e.path);
       }
     }
-    // Verify restored content matches the backup manifest.
     for (const e of manifest.entries) {
       if (!e.existed) continue;
       const actual = await hashFile(path.join(versionDir, e.path)).catch(() => null);
@@ -31,13 +30,10 @@ export async function restoreFromBackup({ versionDir, backup }) {
         throw new Error(`restored file mismatch: ${e.path}`);
       }
     }
-    // Drop the patch receipt so status no longer reports "Installed".
+    // Drop the receipt so status no longer reports "Installed".
     await fs.rm(receiptPathFor(versionDir), { force: true });
-    // Remove the state dir if it is now empty (best effort).
     await fs.rmdir(stateDirFor(versionDir)).catch(() => {});
-    // Prune empty BetterZalo-owned dirs left behind after removing
-    // added files (e.g. betterzalo/plugins/). Only touches our own
-    // namespace; rmdir fails harmlessly on non-empty dirs.
+    // Prune emptied dirs, BetterZalo-owned only.
     await pruneEmptyDirs(path.join(versionDir, 'betterzalo'));
     return { restored, removed };
   } catch (e) {
