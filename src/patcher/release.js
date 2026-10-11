@@ -2,15 +2,10 @@ import { BETTERZALO_ASSET_PATTERNS, betterZaloReleaseApi, ZAPATCH_ASSET_PATTERNS
 import { releaseFailed } from './errors.js';
 import { fetchText, firstHexToken } from './download.js';
 
-// Queries the official GitHub release API and picks the distribution
-// artifact. Keeps the release/download layer modular so BetterZalo's
-// packaging format can evolve without touching patch logic.
-//
-// Verified against the live GitHub API shape:
-//   { tag_name, name, prerelease, draft, assets: [
-//       { name, browser_download_url, size, digest: "sha256:<hex>" } ] }
-// A "<asset>.sha256" sidecar is preferred for verification; the API
-// `digest` field is the fallback. Either way a SHA-256 is required.
+// GitHub release query + artifact picker. Verified against the live API
+// shape ({ tag_name, assets: [{ name, browser_download_url, digest }]}):
+// a "<asset>.sha256" sidecar wins, the API `digest` is the fallback,
+// and artifacts without any verifiable SHA-256 are refused.
 
 function normalizeRelease(data, apiUrl) {
   if (!data || typeof data !== 'object' || !Array.isArray(data.assets)) {
@@ -32,10 +27,10 @@ function normalizeRelease(data, apiUrl) {
   };
 }
 
-export async function fetchLatestRelease(apiUrl) {
+export async function fetchLatestRelease(apiUrl, { timeout } = {}) {
   let body;
   try {
-    body = await fetchText(apiUrl, { headers: { Accept: 'application/vnd.github+json' } });
+    body = await fetchText(apiUrl, { headers: { Accept: 'application/vnd.github+json' }, ...(timeout ? { timeout } : {}) });
   } catch (e) {
     throw releaseFailed(apiUrl, e.message);
   }
@@ -50,7 +45,6 @@ export async function fetchLatestRelease(apiUrl) {
   return release;
 }
 
-// Lists recent releases (newest first) for channel selection.
 export async function listReleases(apiUrl, { limit = 10 } = {}) {
   const listUrl = `${apiUrl.replace(/\/latest\/?$/, '')}?per_page=${Math.max(1, Math.min(limit, 30))}`;
   let body;
@@ -93,9 +87,7 @@ function sidecarFor(release, asset) {
   );
 }
 
-// Resolves the expected SHA-256 for an asset: sidecar file wins, API
-// digest is the fallback. Throws when neither exists — artifacts are
-// never accepted without a verifiable checksum.
+// Sidecar wins, API digest is the fallback; neither means refusal.
 export async function resolveAssetSha256(release, asset) {
   const sidecar = sidecarFor(release, asset);
   if (sidecar) {
@@ -142,11 +134,11 @@ export async function betterZaloRelease(channel = 'stable') {
   return { release, asset, channel: want };
 }
 
-export async function zaPatchRelease() {
+export async function zaPatchRelease({ timeout } = {}) {
   const api = zaPatchReleaseApi();
   let release;
   try {
-    release = await fetchLatestRelease(api);
+    release = await fetchLatestRelease(api, { timeout });
   } catch (e) {
     const prefix = `Release lookup failed (${api}): `;
     const inner = e.code === 'RELEASE_FAILED' && e.message.startsWith(prefix)

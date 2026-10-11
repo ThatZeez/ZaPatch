@@ -2,7 +2,6 @@ import fs from 'node:fs/promises';
 import { configDir, configFile } from './constants.js';
 
 // Persisted installation path so the user is not asked every launch.
-// Shape: { zaloPath: string }
 export async function loadConfig() {
   try {
     const raw = await fs.readFile(configFile(), 'utf8');

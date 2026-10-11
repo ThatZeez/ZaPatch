@@ -5,14 +5,11 @@ import { downloadFile } from './download.js';
 import { selfUpdateFailed } from './errors.js';
 import { resolveAssetSha256, zaPatchRelease } from './release.js';
 
-// ZaPatch self-update. Completely separate from BetterZalo install logic:
-// it only ever replaces the ZaPatch executable itself.
-//
-// Windows cannot overwrite a running .exe, but it CAN rename it, so the
-// swap is: verify download -> rename current to .old -> move new into
-// place -> verify in place. The .old copy is only removed on the next
-// successful start, so a failed swap never leaves ZaPatch unusable.
-// Never runs automatically; only via the menu / `update` command.
+// ZaPatch self-update: replaces only the ZaPatch executable itself.
+// Windows cannot overwrite a running .exe but CAN rename it: verify
+// download -> rename current to .old -> move new into place -> verify.
+// The .old copy is removed on the next successful start. Never automatic;
+// only via the menu / `update` command.
 
 export function normalizeTag(tag) {
   return String(tag || '').trim().replace(/^v/i, '');
@@ -25,9 +22,14 @@ export function isNewer(latest, current) {
   return compareVersions(l, c) > 0;
 }
 
-export async function checkSelfUpdate() {
-  const { release, asset } = await zaPatchRelease();
+export async function checkSelfUpdate({ timeout } = {}) {
+  const { release, asset } = await zaPatchRelease({ timeout });
   return { release, asset, latest: normalizeTag(release.tag) };
+}
+
+export function updateNotice(current, latest) {
+  if (!isNewer(latest, current)) return null;
+  return `ZaPatch v${normalizeTag(latest)} is available — pick "Update ZaPatch" to update.`;
 }
 
 export async function applySelfUpdate({
@@ -58,7 +60,6 @@ export async function applySelfUpdate({
   signal?.throwIfInterrupted?.('self-update');
   await fs.rename(tmpPath, newPath);
 
-  // Swap: rename running exe aside (allowed), move new into place.
   try {
     await fs.rm(oldPath, { force: true }).catch(() => {});
     await fs.rename(target, oldPath);
@@ -69,7 +70,6 @@ export async function applySelfUpdate({
   try {
     await fs.rename(newPath, target);
   } catch (e) {
-    // Roll back the staging rename so ZaPatch stays usable.
     await fs.rename(oldPath, target).catch(() => {});
     await fs.rm(newPath, { force: true }).catch(() => {});
     throw selfUpdateFailed(`cannot install new executable: ${e.message}`);
@@ -82,7 +82,6 @@ export async function applySelfUpdate({
   return { exePath: target, backupExe: oldPath, version: normalizeTag(release.tag) };
 }
 
-// Removes a stale .old.exe left by a previous successful update.
 export async function cleanupStaleBackup(exePath) {
   const target = exePath || process.execPath;
   if (!target.toLowerCase().endsWith('.exe')) return false;

@@ -1,7 +1,5 @@
 import { detectZaloVersion } from './version.js';
 
-// Detects a Zalo update that may have invalidated the patch: compares the
-// live Zalo version against the version recorded in the receipt.
 export async function checkUpdateState({ resolved, receipt }) {
   const live = await detectZaloVersion(resolved);
   if (!receipt) {

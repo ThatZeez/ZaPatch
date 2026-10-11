@@ -8,9 +8,9 @@ function stamp() {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
 }
 
-// Minimal file logger for troubleshooting. Console output is handled by
-// src/cli/output.js; this module only appends to the log file.
-// Never log sensitive data: versions, paths, operations, errors only.
+// Minimal file logger for troubleshooting (console output lives in
+// src/cli/output.js). Versions, paths, operations, errors only —
+// never sensitive data.
 export function createLogger() {
   let file = null;
   async function ensure() {
@@ -22,8 +22,7 @@ export function createLogger() {
   }
 
   async function write(level, msg, extra = {}) {
-    try {
-      const f = await ensure();
+    try {      const f = await ensure();
       const line = JSON.stringify({
         ts: new Date().toISOString(),
         level,
@@ -33,7 +32,6 @@ export function createLogger() {
       });
       await fs.appendFile(f, line + '\n', 'utf8');
     } catch {
-      // Logging must never break patching.
     }
   }
 

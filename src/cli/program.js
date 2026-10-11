@@ -6,7 +6,7 @@ import { downloadCacheDir, EXIT, PATCHER_NAME, PATCHER_VERSION } from '../patche
 import { findDefaultInstall, validateAndResolve } from '../patcher/detection.js';
 import { Codes, PatcherError, unsupportedVersion } from '../patcher/errors.js';
 import { createLogger } from '../patcher/logger.js';
-import { checkWritable, isElevated } from '../patcher/permissions.js';
+import { checkWritable, ensureZaloNotRunning, isElevated } from '../patcher/permissions.js';
 import { loadPackage } from '../patcher/package.js';
 import { applyPatch } from '../patcher/patch.js';
 import { downloadFile } from '../patcher/download.js';
@@ -89,8 +89,7 @@ export function parseArgs(argv) {
   return opts;
 }
 
-// Shared prelude for flows that need a verified installation:
-// resolve path (flag/persisted/prompt) -> validate -> detect version.
+// Shared prelude: flag/persisted/prompt -> validate -> detect version.
 async function resolveVerifiedInstallation(opts, logger, signal) {
   signal?.throwIfInterrupted?.('setup');
   const resolved = await selectInstallation({ zaloPathFlag: opts.zaloPath, signal });
@@ -118,9 +117,8 @@ function progressPrinter(label) {
   };
 }
 
-// Obtains a verified BetterZalo package: explicit --package dir wins
-// (offline); otherwise the official GitHub release for the selected
-// channel is downloaded, verified, and cached for reuse.
+// Verified BetterZalo package: explicit --package dir wins (offline),
+// else the release for the selected channel is downloaded and cached.
 export async function resolveBetterZaloPackage({ pkgDirFlag, channel = 'stable', zaloVersion, logger, signal }) {
   if (pkgDirFlag) {
     const pkg = await loadPackage(pkgDirFlag);
@@ -185,8 +183,6 @@ async function ensureWritable(versionDir) {
   }
 }
 
-// --- Flows (shared by menu actions and subcommands) ---
-
 export async function flowInstall({ opts, logger, signal }) {
   const channel = await selectBuildChannel({
     channelFlag: opts.channel,
@@ -197,6 +193,9 @@ export async function flowInstall({ opts, logger, signal }) {
   await saveConfig(inst.installDir).catch(() => {});
   out.info(`\nDetecting Zalo...         ${out.c.green('OK')}`);
   out.info(`Zalo version: ${inst.zaloVersion} (${inst.versionSource})`);
+  // Fail fast: a running Zalo locks app.asar and the replace fails
+  // with EPERM after the backup. Check before downloading anything.
+  await ensureZaloNotRunning();
 
   const { pkg, channel: resolved, cleanup } = await resolveBetterZaloPackage({
     pkgDirFlag: opts.pkg,
@@ -237,6 +236,7 @@ export async function flowRepair({ opts, logger, signal }) {
   const inst = await resolveVerifiedInstallation(opts, logger, signal);
   await saveConfig(inst.installDir).catch(() => {});
   out.info(`\nZalo version: ${inst.zaloVersion} (${inst.versionSource})`);
+  await ensureZaloNotRunning();
 
   // Without an explicit flag, repair sticks to the channel the install
   // came from so an alpha install is not "repaired" with a stable build.
@@ -351,7 +351,6 @@ export async function flowSelfUpdate({ opts, logger, signal }) {
   return EXIT.OK;
 }
 
-// Menu action map for the interactive main menu.
 export function menuFlows(logger) {
   const base = { logger };
   return {
@@ -361,8 +360,6 @@ export function menuFlows(logger) {
     'self-update': ({ signal }) => flowSelfUpdate({ opts: { yes: false }, logger: base.logger, signal }),
   };
 }
-
-// --- Subcommand entry ---
 
 export async function run(argv = process.argv, { signal = null } = {}) {
   const logger = createLogger();
